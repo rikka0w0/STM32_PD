@@ -40,3 +40,8 @@ void SysTick_Handler(void)
 	osSystickHandler();
 #endif
 }
+
+extern void pd_rx_handler(void);
+void EXTI4_15_IRQHandler(void) {
+	pd_rx_handler();
+}

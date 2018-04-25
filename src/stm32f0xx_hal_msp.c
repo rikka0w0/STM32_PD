@@ -37,7 +37,6 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart) {
 }
 
 void HAL_UART_MspDeInit(UART_HandleTypeDef* huart) {
-
   if(huart->Instance==USART1) {
     /* Peripheral clock disable */
     __HAL_RCC_USART1_CLK_DISABLE();

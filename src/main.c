@@ -1,6 +1,6 @@
 #include <error_handler.h>
 #include "stm32f0xx_hal.h"
-
+#include "pd_phy.h"
 
 UART_HandleTypeDef huart1;
 
@@ -62,12 +62,16 @@ static void UART1_Init(void) {
 		Error_Handler();
 }
 
+
+
 int main(void) {
 	/* Reset of all peripherals, Initializes the Flash interface and the Systick. */
 	HAL_Init();
 
 	SystemClock_Config();
 	UART1_Init();
+
+	pd_init();
 
 	printf("STM32 PD\n");
 
