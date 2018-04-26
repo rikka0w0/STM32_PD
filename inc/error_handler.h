@@ -2,7 +2,7 @@
 #define __ERRHANDLER_H__
 
 // #define USE_FULL_ASSERT 1U
-// #define USE_ERROR_HANDLER 1U
+#define USE_ERROR_HANDLER 1U
 
 #ifdef __cplusplus
  extern "C" {
