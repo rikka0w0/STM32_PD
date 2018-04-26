@@ -1,8 +1,7 @@
 #include "platform.h"
 #include "error_handler.h"
 #include "stm32f0xx_ll_adc.h"
-
-UART_HandleTypeDef huart1;
+#include "stm32f0xx_ll_usart.h"
 
 extern __IO uint32_t uwTick;
 
@@ -20,20 +19,22 @@ uint64_t timestamp_get(void) {
 
 size_t uart_strlen(const char * str) {
 	const char *eos = str;
-	while (*eos++)
-		;
+	while (*eos++);
 	return (eos - str - 1);
 }
 
-int uart_puts(const char *str) {
-	size_t length = uart_strlen(str);
-	return HAL_UART_Transmit(&huart1, (uint8_t *) (str), length, HAL_MAX_DELAY)
-			== HAL_OK ? length : EOF;
+void uart_puts(const char *str) {
+	while (*str) {
+		while(!LL_USART_IsActiveFlag_TXE(USART1));
+		LL_USART_TransmitData8(USART1, *str++);
+		while(!LL_USART_IsActiveFlag_TC(USART1));
+	}
 }
 
-int uart_put(const char c) {
-	return HAL_UART_Transmit(&huart1, (uint8_t *) &c, 1, HAL_MAX_DELAY)
-			== HAL_OK ? c : EOF;
+void uart_put(const char c) {
+	while(!LL_USART_IsActiveFlag_TXE(USART1));
+	LL_USART_TransmitData8(USART1, c);
+	while(!LL_USART_IsActiveFlag_TC(USART1));
 }
 
 void uart_int32(int n) {
@@ -79,19 +80,39 @@ uint32_t adc_read(uint32_t chan) {
 }
 
 static void UART1_Init(void) {
-	huart1.Instance = USART1;
-	huart1.Init.BaudRate = 115200;
-	huart1.Init.WordLength = UART_WORDLENGTH_8B;
-	huart1.Init.StopBits = UART_STOPBITS_1;
-	huart1.Init.Parity = UART_PARITY_NONE;
-	huart1.Init.Mode = UART_MODE_TX_RX;
-	huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-	huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-	huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-	huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+	LL_USART_InitTypeDef USART_InitStruct;
+	GPIO_InitTypeDef GPIO_InitStruct;
 
-	if (HAL_UART_Init(&huart1) != HAL_OK)
-		Error_Handler();
+	__HAL_RCC_USART1_CLK_ENABLE();
+	__HAL_RCC_GPIOA_CLK_ENABLE();
+
+	/**
+	 USART1 GPIO Configuration
+	 PA9     ------> USART1_TX
+	 PA10     ------> USART1_RX
+	 */
+	GPIO_InitStruct.Pin = GPIO_PIN_9 | GPIO_PIN_10;
+	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+	GPIO_InitStruct.Alternate = GPIO_AF1_USART1;
+	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+	USART_InitStruct.BaudRate = 115200;
+	USART_InitStruct.DataWidth = LL_USART_DATAWIDTH_8B;
+	USART_InitStruct.StopBits = LL_USART_STOPBITS_1;
+	USART_InitStruct.Parity = LL_USART_PARITY_NONE;
+	USART_InitStruct.TransferDirection = LL_USART_DIRECTION_TX_RX;
+	USART_InitStruct.HardwareFlowControl = LL_USART_HWCONTROL_NONE;
+	USART_InitStruct.OverSampling = LL_USART_OVERSAMPLING_16;
+	LL_USART_Init(USART1, &USART_InitStruct);
+
+	LL_USART_DisableIT_CTS(USART1);
+	LL_USART_DisableOverrunDetect(USART1);
+	LL_USART_DisableDMADeactOnRxErr(USART1);
+	LL_USART_ConfigAsyncMode(USART1);
+
+	LL_USART_Enable(USART1);
 }
 
 static void SystemClock_Config(void) {
@@ -137,40 +158,41 @@ static void SystemClock_Config(void) {
 }
 
 static void ADC_Init(void) {
-	  LL_ADC_InitTypeDef ADC_InitStruct;
-	  LL_ADC_REG_InitTypeDef ADC_REG_InitStruct;
+	LL_ADC_InitTypeDef ADC_InitStruct;
+	LL_ADC_REG_InitTypeDef ADC_REG_InitStruct;
 
-	  __HAL_RCC_ADC1_CLK_ENABLE();
+	__HAL_RCC_ADC1_CLK_ENABLE();
 
-	  LL_ADC_SetCommonPathInternalCh(__LL_ADC_COMMON_INSTANCE(ADC1), LL_ADC_PATH_INTERNAL_TEMPSENSOR);
+	LL_ADC_SetCommonPathInternalCh(__LL_ADC_COMMON_INSTANCE(ADC1),
+			LL_ADC_PATH_INTERNAL_TEMPSENSOR);
 
-	  // Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
-	  ADC_InitStruct.Clock = LL_ADC_CLOCK_ASYNC;
-	  ADC_InitStruct.Resolution = LL_ADC_RESOLUTION_12B;
-	  ADC_InitStruct.DataAlignment = LL_ADC_DATA_ALIGN_RIGHT;
-	  ADC_InitStruct.LowPowerMode = LL_ADC_LP_MODE_NONE;
-	  LL_ADC_Init(ADC1, &ADC_InitStruct);
+	// Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+	ADC_InitStruct.Clock = LL_ADC_CLOCK_ASYNC;
+	ADC_InitStruct.Resolution = LL_ADC_RESOLUTION_12B;
+	ADC_InitStruct.DataAlignment = LL_ADC_DATA_ALIGN_RIGHT;
+	ADC_InitStruct.LowPowerMode = LL_ADC_LP_MODE_NONE;
+	LL_ADC_Init(ADC1, &ADC_InitStruct);
 
-	  ADC_REG_InitStruct.TriggerSource = LL_ADC_REG_TRIG_SOFTWARE;
-	  ADC_REG_InitStruct.SequencerDiscont = LL_ADC_REG_SEQ_DISCONT_DISABLE;
-	  ADC_REG_InitStruct.ContinuousMode = LL_ADC_REG_CONV_SINGLE;
-	  ADC_REG_InitStruct.DMATransfer = LL_ADC_REG_DMA_TRANSFER_LIMITED;
-	  ADC_REG_InitStruct.Overrun = LL_ADC_REG_OVR_DATA_PRESERVED;
-	  LL_ADC_REG_Init(ADC1, &ADC_REG_InitStruct);
+	ADC_REG_InitStruct.TriggerSource = LL_ADC_REG_TRIG_SOFTWARE;
+	ADC_REG_InitStruct.SequencerDiscont = LL_ADC_REG_SEQ_DISCONT_DISABLE;
+	ADC_REG_InitStruct.ContinuousMode = LL_ADC_REG_CONV_SINGLE;
+	ADC_REG_InitStruct.DMATransfer = LL_ADC_REG_DMA_TRANSFER_LIMITED;
+	ADC_REG_InitStruct.Overrun = LL_ADC_REG_OVR_DATA_PRESERVED;
+	LL_ADC_REG_Init(ADC1, &ADC_REG_InitStruct);
 
-	  LL_ADC_REG_SetSequencerScanDirection(ADC1, LL_ADC_REG_SEQ_SCAN_DIR_FORWARD);
+	LL_ADC_REG_SetSequencerScanDirection(ADC1, LL_ADC_REG_SEQ_SCAN_DIR_FORWARD);
 
-	  LL_ADC_REG_SetSequencerChAdd(ADC1, LL_ADC_CHANNEL_TEMPSENSOR);
+	LL_ADC_REG_SetSequencerChAdd(ADC1, LL_ADC_CHANNEL_TEMPSENSOR);
 
-	  LL_ADC_SetSamplingTimeCommonChannels(ADC1, LL_ADC_SAMPLINGTIME_239CYCLES_5);
+	LL_ADC_SetSamplingTimeCommonChannels(ADC1, LL_ADC_SAMPLINGTIME_239CYCLES_5);
 
-	  LL_ADC_DisableIT_EOC(ADC1);
-	  LL_ADC_DisableIT_EOS(ADC1);
+	LL_ADC_DisableIT_EOC(ADC1);
+	LL_ADC_DisableIT_EOS(ADC1);
 
-	  LL_ADC_StartCalibration(ADC1);
-	  while(LL_ADC_IsCalibrationOnGoing(ADC1));
+	LL_ADC_StartCalibration(ADC1);
+	while (LL_ADC_IsCalibrationOnGoing(ADC1));
 
-	  LL_ADC_Enable(ADC1);
+	LL_ADC_Enable(ADC1);
 }
 
 void hw_init(void) {

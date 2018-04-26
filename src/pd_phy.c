@@ -33,11 +33,6 @@ void pd_init(void) {
 	HAL_NVIC_EnableIRQ(EXTI2_3_IRQn);
 }
 
-//static inline int pd_adc_read(int port, int cc)
-//{
-//
-//}
-
 void pd_rx_enable_monitoring() {
 	/* clear comparator external interrupt */
 	EXTI->PR = PD_CC_COMP;		// Pending register

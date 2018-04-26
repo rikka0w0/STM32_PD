@@ -53,7 +53,7 @@
 #include <sys/time.h>
 #include <sys/times.h>
 
-#include "stm32f0xx_hal.h"
+#include "platform.h"
 
 /* Variables */
 //#undef errno
@@ -101,10 +101,12 @@ int _read (int file, char *ptr, int len)
 return len;
 }
 
-extern UART_HandleTypeDef huart1;
 int _write(int file, char *ptr, int len) {
 	if (file == 1) {
-		return HAL_UART_Transmit(&huart1, (uint8_t *)(ptr), len, HAL_MAX_DELAY) == HAL_OK ? len : -1;
+		for (int i=0; i<len; i++) {
+			uart_put(ptr[i]);
+		}
+		return len;
 	}
 
 	for (int DataIdx = 0; DataIdx < len; DataIdx++) {
