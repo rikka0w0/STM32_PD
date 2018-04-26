@@ -1,7 +1,7 @@
 #include "platform.h"
 #include "error_handler.h"
+#include "stm32f0xx_ll_adc.h"
 
-ADC_HandleTypeDef hadc;
 UART_HandleTypeDef huart1;
 
 extern __IO uint32_t uwTick;
@@ -40,18 +40,42 @@ void uart_int32(int n) {
 	char s[16];
 	int i, j, sign;
 
-	if ((sign = n) < 0)    //记录符号
-		n = -n;         //使n成为正数
+	if ((sign = n) < 0)
+		n = -n;
 	i = 0;
 	do {
-		s[i++] = n % 10 + '0';    //取下一个数字
-	} while ((n /= 10) > 0);      //循环相除
+		s[i++] = n % 10 + '0';
+	} while ((n /= 10) > 0);
 
 	if (sign < 0)
 		s[i++] = '-';
 
-	for (j = i - 1; j >= 0; j--)        //生成的数字是逆序的，所以要逆序输出
+	for (j = i - 1; j >= 0; j--)
 		uart_put(s[j]);
+}
+
+uint32_t adc_read_temperature() {
+	return TSENSOR_ADC2T100(adc_read(LL_ADC_CHANNEL_TEMPSENSOR));
+};
+
+uint32_t adc_read(uint32_t chan) {
+	// Configure the channel
+	LL_ADC_REG_SetSequencerChannels(ADC1, chan);
+	LL_ADC_REG_SetDMATransfer(ADC1, LL_ADC_REG_DMA_TRANSFER_NONE);
+
+	/* Clear flags */
+	LL_ADC_ClearFlag_EOSMP(ADC1);
+	LL_ADC_ClearFlag_EOC(ADC1);
+	LL_ADC_ClearFlag_EOS(ADC1);
+
+	/* Start conversion */
+	LL_ADC_REG_StartConversion(ADC1);
+
+	/* Wait for end of conversion */
+	while (LL_ADC_REG_IsConversionOngoing(ADC1));
+
+	/* read converted value */
+	return LL_ADC_REG_ReadConversionData32(ADC1);
 }
 
 static void UART1_Init(void) {
@@ -75,8 +99,7 @@ static void SystemClock_Config(void) {
 	RCC_ClkInitTypeDef RCC_ClkInitStruct;
 	RCC_PeriphCLKInitTypeDef PeriphClkInit;
 
-	/**Initializes the CPU, AHB and APB busses clocks
-	 */
+	// Initializes the CPU, AHB and APB busses clocks
 	RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI
 			| RCC_OSCILLATORTYPE_HSI14;
 	RCC_OscInitStruct.HSIState = RCC_HSI_ON;
@@ -114,45 +137,40 @@ static void SystemClock_Config(void) {
 }
 
 static void ADC_Init(void) {
-	ADC_ChannelConfTypeDef sConfig;
+	  LL_ADC_InitTypeDef ADC_InitStruct;
+	  LL_ADC_REG_InitTypeDef ADC_REG_InitStruct;
 
-	// Enable ADC1 clock
-	__HAL_RCC_ADC1_CLK_ENABLE()
-	;
+	  __HAL_RCC_ADC1_CLK_ENABLE();
 
-	// Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
-	hadc.Instance = ADC1;
-	hadc.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV1;
-	hadc.Init.Resolution = ADC_RESOLUTION_12B;
-	hadc.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-	hadc.Init.ScanConvMode = ADC_SCAN_DIRECTION_FORWARD;
-	hadc.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-	hadc.Init.LowPowerAutoWait = DISABLE;
-	hadc.Init.LowPowerAutoPowerOff = DISABLE;
-	hadc.Init.ContinuousConvMode = DISABLE;
-	hadc.Init.DiscontinuousConvMode = DISABLE;
-	hadc.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-	hadc.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-	hadc.Init.DMAContinuousRequests = DISABLE;
-	hadc.Init.Overrun = ADC_OVR_DATA_PRESERVED;
-	if (HAL_ADC_Init(&hadc) != HAL_OK)
-		Error_Handler();
+	  LL_ADC_SetCommonPathInternalCh(__LL_ADC_COMMON_INSTANCE(ADC1), LL_ADC_PATH_INTERNAL_TEMPSENSOR);
 
-	HAL_ADCEx_Calibration_Start(&hadc);
+	  // Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+	  ADC_InitStruct.Clock = LL_ADC_CLOCK_ASYNC;
+	  ADC_InitStruct.Resolution = LL_ADC_RESOLUTION_12B;
+	  ADC_InitStruct.DataAlignment = LL_ADC_DATA_ALIGN_RIGHT;
+	  ADC_InitStruct.LowPowerMode = LL_ADC_LP_MODE_NONE;
+	  LL_ADC_Init(ADC1, &ADC_InitStruct);
 
-	sConfig.Rank = ADC_RANK_CHANNEL_NUMBER;
-	sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
-	sConfig.Channel = ADC_CHANNEL_2;
-	if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
-		Error_Handler();
+	  ADC_REG_InitStruct.TriggerSource = LL_ADC_REG_TRIG_SOFTWARE;
+	  ADC_REG_InitStruct.SequencerDiscont = LL_ADC_REG_SEQ_DISCONT_DISABLE;
+	  ADC_REG_InitStruct.ContinuousMode = LL_ADC_REG_CONV_SINGLE;
+	  ADC_REG_InitStruct.DMATransfer = LL_ADC_REG_DMA_TRANSFER_LIMITED;
+	  ADC_REG_InitStruct.Overrun = LL_ADC_REG_OVR_DATA_PRESERVED;
+	  LL_ADC_REG_Init(ADC1, &ADC_REG_InitStruct);
 
-	sConfig.Channel = ADC_CHANNEL_4;
-	if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
-		Error_Handler();
+	  LL_ADC_REG_SetSequencerScanDirection(ADC1, LL_ADC_REG_SEQ_SCAN_DIR_FORWARD);
 
-	sConfig.Channel = ADC_CHANNEL_TEMPSENSOR;
-	if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
-		Error_Handler();
+	  LL_ADC_REG_SetSequencerChAdd(ADC1, LL_ADC_CHANNEL_TEMPSENSOR);
+
+	  LL_ADC_SetSamplingTimeCommonChannels(ADC1, LL_ADC_SAMPLINGTIME_239CYCLES_5);
+
+	  LL_ADC_DisableIT_EOC(ADC1);
+	  LL_ADC_DisableIT_EOS(ADC1);
+
+	  LL_ADC_StartCalibration(ADC1);
+	  while(LL_ADC_IsCalibrationOnGoing(ADC1));
+
+	  LL_ADC_Enable(ADC1);
 }
 
 void hw_init(void) {
