@@ -12,7 +12,7 @@ uint64_t timestamp_get(void) {
 	uint32_t ms, systick;
 	do {
 		ms = uwTick;
-		systick = SysTick->VAL;
+		systick = SysTick->LOAD - SysTick->VAL;
 	} while (ms != uwTick);
 	return ms * 1000 + systick / SYSTICK_PER_US;
 }
@@ -55,11 +55,11 @@ void uart_int32(int n) {
 		uart_put(s[j]);
 }
 
-uint32_t adc_read_temperature() {
+uint16_t adc_read_temperature() {
 	return TSENSOR_ADC2T100(adc_read(LL_ADC_CHANNEL_TEMPSENSOR));
 };
 
-uint32_t adc_read(uint32_t chan) {
+uint16_t adc_read(uint32_t chan) {
 	// Configure the channel
 	LL_ADC_REG_SetSequencerChannels(ADC1, chan);
 	LL_ADC_REG_SetDMATransfer(ADC1, LL_ADC_REG_DMA_TRANSFER_NONE);
@@ -76,7 +76,7 @@ uint32_t adc_read(uint32_t chan) {
 	while (LL_ADC_REG_IsConversionOngoing(ADC1));
 
 	/* read converted value */
-	return LL_ADC_REG_ReadConversionData32(ADC1);
+	return LL_ADC_REG_ReadConversionData12(ADC1);
 }
 
 static void UART1_Init(void) {

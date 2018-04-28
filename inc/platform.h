@@ -16,8 +16,8 @@ void uart_put(const char c);
 void uart_int32(int n);
 
 // ADC
-uint32_t adc_read(uint32_t chan);
-uint32_t adc_read_temperature(void);
+uint16_t adc_read(uint32_t chan);
+uint16_t adc_read_temperature(void);
 
 void hw_init(void);
 
