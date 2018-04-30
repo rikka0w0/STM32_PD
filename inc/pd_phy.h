@@ -31,6 +31,16 @@
 #define USB_PD_RX_TMOUT_US 1800
 #define PD_RX_THRESHOLD 30	// @ 12 MHz Timer rate
 
+enum pd_rx_errors {
+	PD_RX_ERR_INVAL = -1,           /* Invalid packet */
+	PD_RX_ERR_HARD_RESET = -2,      /* Got a Hard-Reset packet */
+	PD_RX_ERR_CRC = -3,             /* CRC mismatch */
+	PD_RX_ERR_ID = -4,              /* Invalid ID number */
+	PD_RX_ERR_UNSUPPORTED_SOP = -5, /* Unsupported SOP */
+	PD_RX_ERR_CABLE_RESET = -6,      /* Got a Cable-Reset packet */
+	PD_RX_ERR_TIMEOUT = -7
+};
+
 void pd_init(void);
 void pd_select_cc(uint8_t cc);
 void pd_rx_disable_monitoring(void);
