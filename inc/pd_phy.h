@@ -3,10 +3,12 @@
 
 #include <stdint.h>
 
+// GPIO usages
 #define PD_CC1_PIN GPIO_PIN_2
 #define PD_CC2_PIN GPIO_PIN_4
-#define PD_CC_COMP GPIO_PIN_7
 #define PD_CC_GPIO GPIOA
+#define PD_COMP_PIN GPIO_PIN_1	// PB1 as TIM3_CH4 during rx
+#define PD_COMP_GPIO GPIOB
 
 #define PD_CC_MASK	0x03
 #define PD_CC_NC	0x00
@@ -14,13 +16,26 @@
 #define PD_CC_2		0x02
 #define PD_CC_UNDEF	PD_CC_MASK
 
+/*
+ * Maximum size of a Power Delivery packet (in bits on the wire) :
+ *    16-bit header + 0..7 32-bit data objects  (+ 4b5b encoding)
+ * 64-bit preamble + SOP (4x 5b) + message in 4b5b + 32-bit CRC + EOP (1x 5b)
+ * = 64 + 4*5 + 16 * 5/4 + 7 * 32 * 5/4 + 32 * 5/4 + 5
+ */
+#define PD_BIT_LEN 429
+
 /* number of edges and time window to detect CC line is not idle */
 #define PD_RX_TRANSITION_COUNT  3
 #define PD_RX_TRANSITION_WINDOW 20 /* between 12us and 20us */
+/* Timeout for message receive in microseconds */
+#define USB_PD_RX_TMOUT_US 1800
+#define PD_RX_THRESHOLD 30	// @ 12 MHz Timer rate
 
 void pd_init(void);
 void pd_select_cc(uint8_t cc);
-void pd_rx_disable_monitoring();
-void pd_rx_enable_monitoring();
+void pd_rx_disable_monitoring(void);
+void pd_rx_enable_monitoring(void);
+uint32_t pd_rx_started(void);
+void pd_rx_process(void);
 
 #endif // __PD_PHY_H

@@ -117,25 +117,30 @@ void pd_sink_run(void) {
 		}
 		break;
 	case PD_PORTSTATE_CONNECTED:
-		if ((pd_port_status & PD_CC_MASK) == PD_CC_1) {
-			if (pd_detect_cc(PD_CC_1) == PD_ICAP_NC) {
-				HAL_Delay(1);
+		if (pd_rx_started()) {
+			pd_rx_process();
+		} else {
+			if ((pd_port_status & PD_CC_MASK) == PD_CC_1) {
 				if (pd_detect_cc(PD_CC_1) == PD_ICAP_NC) {
-					pd_port_status &=~ (PD_CC_MASK|PD_PORTSTATE_MASK);
-					pd_port_status |= PD_CC_NC | PD_PORTSTATE_DISCONNECTED;
-					pd_cc_disconnected();
+					HAL_Delay(1);
+					if (pd_detect_cc(PD_CC_1) == PD_ICAP_NC) {
+						pd_port_status &=~ (PD_CC_MASK|PD_PORTSTATE_MASK);
+						pd_port_status |= PD_CC_NC | PD_PORTSTATE_DISCONNECTED;
+						pd_cc_disconnected();
+					}
 				}
-			}
-		} else if ((pd_port_status & PD_CC_MASK) == PD_CC_2) {
-			if (pd_detect_cc(PD_CC_2) == PD_ICAP_NC) {
-				HAL_Delay(1);
+			} else if ((pd_port_status & PD_CC_MASK) == PD_CC_2) {
 				if (pd_detect_cc(PD_CC_2) == PD_ICAP_NC) {
-					pd_port_status &=~ (PD_CC_MASK|PD_PORTSTATE_MASK);
-					pd_port_status |= PD_CC_NC | PD_PORTSTATE_DISCONNECTED;
-					pd_cc_disconnected();
+					HAL_Delay(1);
+					if (pd_detect_cc(PD_CC_2) == PD_ICAP_NC) {
+						pd_port_status &=~ (PD_CC_MASK|PD_PORTSTATE_MASK);
+						pd_port_status |= PD_CC_NC | PD_PORTSTATE_DISCONNECTED;
+						pd_cc_disconnected();
+					}
 				}
 			}
 		}
+
 //		HAL_Delay (1000);
 //		uart_puts("V1=");
 //		uart_int32(adc_read(1<<2));
