@@ -22,7 +22,8 @@
  * 64-bit preamble + SOP (4x 5b) + message in 4b5b + 32-bit CRC + EOP (1x 5b)
  * = 64 + 4*5 + 16 * 5/4 + 7 * 32 * 5/4 + 32 * 5/4 + 5
  */
-#define PD_BIT_LEN 429
+#define PD_BIT_LEN 428
+#define PD_MAX_RAW_SIZE (PD_BIT_LEN*2)
 
 /* number of edges and time window to detect CC line is not idle */
 #define PD_RX_TRANSITION_COUNT  3
@@ -30,6 +31,13 @@
 /* Timeout for message receive in microseconds */
 #define USB_PD_RX_TMOUT_US 1800
 #define PD_RX_THRESHOLD 30	// @ 12 MHz Timer rate
+
+/* Used for processing pd header */
+#define PD_HEADER_EXT(header)  (((header) >> 15) & 1)
+#define PD_HEADER_CNT(header)  (((header) >> 12) & 7)
+#define PD_HEADER_TYPE(header) ((header) & 0xF)
+#define PD_HEADER_ID(header)   (((header) >> 9) & 7)
+#define PD_HEADER_REV(header)  (((header) >> 6) & 3)
 
 enum pd_rx_errors {
 	PD_RX_SOPPP = 3,

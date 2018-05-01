@@ -79,6 +79,12 @@ uint16_t adc_read(uint32_t chan) {
 	return LL_ADC_REG_ReadConversionData12(ADC1);
 }
 
+void crc32_init(void) {
+	__HAL_RCC_CRC_CLK_ENABLE();
+	CRC->CR = 0xE1; // Reverse output data, Reverse input data by word, Reset, RM0091 Page 224.
+	while (CRC->CR & 1);
+}
+
 static void UART1_Init(void) {
 	LL_USART_InitTypeDef USART_InitStruct;
 	GPIO_InitTypeDef GPIO_InitStruct;

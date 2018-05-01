@@ -1,10 +1,9 @@
 #include "platform.h"
 #include "pd_phy.h"
 
-volatile uint8_t raw_samples_rising[PD_BIT_LEN];
-volatile uint8_t raw_samples_falling[PD_BIT_LEN];
-uint16_t rising_ptr;
-uint16_t falling_ptr;
+uint32_t raw_samples_buf[PD_MAX_RAW_SIZE/4];
+uint8_t* raw_samples;
+uint16_t raw_ptr;
 uint8_t* rx_ptr;
 
 static uint64_t rx_edge_ts[PD_RX_TRANSITION_COUNT];
@@ -105,15 +104,15 @@ void pd_init(void) {
 	TIM3->PSC = (48000000 / 12000000) - 1; // Prescaler = fAPB1_Timer / 12MHz - 1;
 	TIM3->CCR2 = (12000000 / 1000) * USB_PD_RX_TMOUT_US / 1000;	// Channel 2 - Timeout = 21600 Ticks
 
-	// RM0091 page 449, IC3=TI4FP3 input, IC4 = TI4FP4 input
-	TIM3->CCMR2 = 0x102;
+	// RM0091 page 449, IC4 = TI4FP4 input
+	TIM3->CCMR2 = 0x100;
 	// RM0091 page 450, CC3E=CC4E=1, Capture enabled
 	// CC3NP=CC4NP=0; CC3P=1, CC4P=0, IC3 falling, IC4 rising
-	TIM3->CCER = 0x1300;
+	TIM3->CCER = 0xB000;
 	// RM0091 page 441, Enable DMA request for IC3 and IC4
-	TIM3->DIER = 0x1800;
+	TIM3->DIER = 0x1000;
 	// RM0091 page 444, Enable update, CC3 and CC4 generation
-	TIM3->EGR = 0x19;
+	TIM3->EGR = 0x11;
 	// RM0091 page 442, Clear flags
 	TIM3->SR = 0;
 
@@ -144,11 +143,12 @@ void pd_rx_complete() {
 	/* stop stampling TIM2 */
 	TIM3->CR1 &= ~1; // CEN = 0;
 	// Disable DMA
-	DMA1_Channel2->CCR = 0;
 	DMA1_Channel3->CCR = 0;
 }
 
 void pd_rx_start() {
+	raw_samples = (uint8_t*) raw_samples_buf;
+
 	// Comparator GPIO -> Alternate function mode (for TIM3_CH4)
 	GPIO_InitTypeDef GPIO_InitStruct;
     GPIO_InitStruct.Pin = PD_COMP_PIN;
@@ -159,27 +159,20 @@ void pd_rx_start() {
     HAL_GPIO_Init(PD_COMP_GPIO, &GPIO_InitStruct);
 
 	// Disable DMA
-	DMA1_Channel2->CCR = 0;
 	DMA1_Channel3->CCR = 0;
 	// Clear ISR
 	DMA1->IFCR = 0xFF0;
 
 	// Priority very high, MSIZE=16, PSIZE=16, Memory increment mode
-	DMA1_Channel2->CCR = 0x3180;
-	DMA1_Channel2->CNDTR = PD_BIT_LEN;
-	DMA1_Channel2->CPAR = &(TIM3->CCR3);
-	DMA1_Channel2->CMAR = (uint32_t)raw_samples_falling;
-
 	DMA1_Channel3->CCR = 0x3180;
-	DMA1_Channel3->CNDTR = PD_BIT_LEN;
+	DMA1_Channel3->CNDTR = PD_MAX_RAW_SIZE;
 	DMA1_Channel3->CPAR = &(TIM3->CCR4);
-	DMA1_Channel3->CMAR = (uint32_t)raw_samples_rising;
+	DMA1_Channel3->CMAR = (uint32_t)raw_samples;
 
 	/* Flush data in write buffer so that DMA can get the lastest data */
 	asm volatile("dsb;");
 
 	// Enable DMA
-	DMA1_Channel2->CCR |= 0x01;
 	DMA1_Channel3->CCR |= 0x01;
 
 	TIM3->CNT = 0;
@@ -224,88 +217,30 @@ void pd_rx_handler(void) {
 	}
 }
 
-#define PD_RX_STATE_RMF 1	// Rising - Falling
-uint8_t pd_rx_state;
-inline static char pd_get_raw_bit(void) {
-	uint8_t diff;
-	if (pd_rx_state & PD_RX_STATE_RMF) {
-		// Wait for new rising
-		if (PD_BIT_LEN - DMA1_Channel3->CNDTR < 3 && !(TIM3->SR & 4)) {
-			while (PD_BIT_LEN - DMA1_Channel3->CNDTR < 3 && !(TIM3->SR & 4))
-				;
-			if (TIM3->SR & 4) {
-				return PD_RX_ERR_TIMEOUT;
-			}
-		}
-
-		if (raw_samples_rising[rising_ptr] > raw_samples_falling[falling_ptr]) {
-			diff = raw_samples_rising[rising_ptr]
-					- raw_samples_falling[falling_ptr];
-		} else {
-			diff = 255 - raw_samples_falling[falling_ptr];
-			diff += 1 + raw_samples_rising[rising_ptr];
-		}
-		falling_ptr++;
-		pd_rx_state &= ~PD_RX_STATE_RMF;
-	} else {
-		// Wait for new falling
-		if (PD_BIT_LEN - DMA1_Channel2->CNDTR < 3 && !(TIM3->SR & 4)) {
-			while (PD_BIT_LEN - DMA1_Channel2->CNDTR < 3 && !(TIM3->SR & 4))
-				;
-			if (TIM3->SR & 4) {
-				return PD_RX_ERR_TIMEOUT;
-			}
-		}
-
-		if (raw_samples_falling[falling_ptr] > raw_samples_rising[rising_ptr]) {
-			diff = raw_samples_falling[falling_ptr]
-					- raw_samples_rising[rising_ptr];
-		} else {
-			diff = 255 - raw_samples_rising[rising_ptr];
-			diff += 1 + raw_samples_falling[falling_ptr];
-		}
-		rising_ptr++;
-		pd_rx_state |= PD_RX_STATE_RMF;	// Next is Rising - Falling
-	}
-
-	return diff <= 30;
-}
-
 uint8_t pd_find_preamble(void) {
-	// Rising	DMA1_CH3, TIM3_CH4
-	// Falling	DMA1_CH2, TIM3_CH3
-	rising_ptr = 2; 	// DMA1_CH3, TIM3_CH4
-	falling_ptr = 2;	// DMA1_CH2, TIM3_CH3
-
-	// Wait for two captures
-	while (((PD_BIT_LEN - DMA1_Channel2->CNDTR < 3)	|| (PD_BIT_LEN - DMA1_Channel3->CNDTR < 3))
-			&& !(TIM3->SR & 4));
-	if (TIM3->SR & 4) {
-		return PD_RX_ERR_TIMEOUT;
-	}
-
-	// F: 0  4 44 105
-	// R: 0 27 88 128
-	if (raw_samples_rising[rising_ptr] > raw_samples_falling[falling_ptr]) { // 94 > 51
-		// Rising is more recent
-		//See PD3.0 Spec. page 78
-		pd_rx_state |= PD_RX_STATE_RMF;
-	} else {
-		// Falling is more recent
-		pd_rx_state &= ~PD_RX_STATE_RMF;
-	}
+	raw_ptr = 2; 	// DMA1_CH3, TIM3_CH4
 
 	uint32_t all = 0;
-	char curbit;
-	uint32_t bit = 2;
-	while (bit < PD_BIT_LEN) {
-		curbit = pd_get_raw_bit();
-		if (curbit < 0)
-			return PD_RX_ERR_TIMEOUT;
+	raw_ptr = 2;
+	while (raw_ptr < PD_BIT_LEN) {
+		if ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)) {
+			while ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)
+					&& !(TIM3->SR & 4));
+			if (TIM3->SR & 4) {
+				return PD_RX_ERR_TIMEOUT;
+			}
+		}
 
-		all >>= 1;
-		if (curbit)
-			all |= (1<<31);
+		uint8_t cnt;
+		if (raw_samples[raw_ptr] > raw_samples[raw_ptr-1]) {
+			cnt = raw_samples[raw_ptr] - raw_samples[raw_ptr-1];
+		} else {
+			cnt = 255 - raw_samples[raw_ptr-1];
+			cnt += 1 + raw_samples[raw_ptr];
+		}
+		raw_ptr++;
+
+		all = (all >> 1) | (cnt <= PD_RX_THRESHOLD ? 1 << 31 : 0);
 
 		if (all == 0xC7E3C78D) {	// SOP, Sync2 Sync1 Sync1 Sync1 101
 			return PD_RX_SOP;
@@ -314,8 +249,6 @@ uint8_t pd_find_preamble(void) {
 		} else if (all == 0x3c7fe0ff) {
 			return PD_RX_ERR_CABLE_RESET; /* got CABLE-RESET */
 		}
-
-		bit++;
 	}
 
 		/*
@@ -365,116 +298,136 @@ uint8_t pd_find_preamble(void) {
 	return PD_RX_ERR_INVAL;
 }
 
-char pd_rx_decode_1byte(void) {
-	uint8_t nibble = 0;
-	uint8_t byte = 0;
-	char curbit = pd_get_raw_bit();
-	if (curbit < 0)
-		return PD_RX_ERR_TIMEOUT;
-	if (curbit) {
-		nibble = 1;
-		pd_get_raw_bit();
+char pd_rx_decode_byte(void) {
+	uint8_t nibble;
+	uint8_t raw = 0;
+	uint8_t cnt;
+
+	for (uint8_t bit=0; bit<5; bit++) {
+		if ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)) {
+			while ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)
+					&& !(TIM3->SR & 4));
+			if (TIM3->SR & 4) {
+				return PD_RX_ERR_TIMEOUT;
+			}
+		}
+		if (raw_samples[raw_ptr] > raw_samples[raw_ptr-1]) {
+			cnt = raw_samples[raw_ptr] - raw_samples[raw_ptr-1];
+		} else {
+			cnt = 255 - raw_samples[raw_ptr-1];
+			cnt += 1 + raw_samples[raw_ptr];
+		}
+		raw_ptr++;
+		if (cnt <= PD_RX_THRESHOLD) {
+			raw |= 1 << bit;
+			if ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)) {
+				while ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)
+						&& !(TIM3->SR & 4));
+				if (TIM3->SR & 4) {
+					return PD_RX_ERR_TIMEOUT;
+				}
+			}
+			raw_ptr++; // Absorb next raw bit
+		}
 	}
 
-	curbit = pd_get_raw_bit();
-	if (curbit < 0)
-		return PD_RX_ERR_TIMEOUT;
-	if (curbit) {
-		nibble |= 2;
-		pd_get_raw_bit();
-	}
-
-	curbit = pd_get_raw_bit();
-	if (curbit < 0)
-		return PD_RX_ERR_TIMEOUT;
-	if (curbit) {
-		nibble |= 4;
-		pd_get_raw_bit();
-	}
-
-	curbit = pd_get_raw_bit();
-	if (curbit < 0)
-		return PD_RX_ERR_TIMEOUT;
-	if (curbit) {
-		nibble |= 8;
-		pd_get_raw_bit();
-	}
-
-	curbit = pd_get_raw_bit();
-	if (curbit < 0)
-		return PD_RX_ERR_TIMEOUT;
-	if (curbit) {
-		nibble |= 16;
-		pd_get_raw_bit();
-	}
-
-	nibble = dec4b5b[nibble];
+	nibble = dec4b5b[raw&0x1F];
 	if (nibble > 15)
 		return nibble;
 
-/////////////////////////////////////////
-	curbit = pd_get_raw_bit();
-	if (curbit < 0)
-		return PD_RX_ERR_TIMEOUT;
-	if (curbit) {
-		byte = 1;
-		pd_get_raw_bit();
+	raw = 0;
+	for (uint8_t bit=5; bit<10; bit++) {
+		if ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)) {
+			while ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)
+					&& !(TIM3->SR & 4));
+			if (TIM3->SR & 4) {
+				return PD_RX_ERR_TIMEOUT;
+			}
+		}
+		if (raw_samples[raw_ptr] > raw_samples[raw_ptr-1]) {
+			cnt = raw_samples[raw_ptr] - raw_samples[raw_ptr-1];
+		} else {
+			cnt = 255 - raw_samples[raw_ptr-1];
+			cnt += 1 + raw_samples[raw_ptr];
+		}
+		raw_ptr++;
+		if (cnt <= PD_RX_THRESHOLD) {
+			raw |= 1 << (bit-5);
+			if ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)) {
+				while ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)
+						&& !(TIM3->SR & 4));
+				if (TIM3->SR & 4) {
+					return PD_RX_ERR_TIMEOUT;
+				}
+			}
+			raw_ptr++; // Absorb next raw bit
+		}
 	}
 
-	curbit = pd_get_raw_bit();
-	if (curbit < 0)
-		return PD_RX_ERR_TIMEOUT;
-	if (curbit) {
-		byte |= 2;
-		pd_get_raw_bit();
-	}
+	raw = dec4b5b[raw&0x1F];
+	if (raw > 15)
+		return raw;
 
-	curbit = pd_get_raw_bit();
-	if (curbit < 0)
-		return PD_RX_ERR_TIMEOUT;
-	if (curbit) {
-		byte |= 4;
-		pd_get_raw_bit();
-	}
-
-	curbit = pd_get_raw_bit();
-	if (curbit < 0)
-		return PD_RX_ERR_TIMEOUT;
-	if (curbit) {
-		byte |= 8;
-		pd_get_raw_bit();
-	}
-
-	curbit = pd_get_raw_bit();
-	if (curbit < 0)
-		return PD_RX_ERR_TIMEOUT;
-	if (curbit) {
-		byte |= 16;
-		pd_get_raw_bit();
-	}
-
-	byte = dec4b5b[byte];
-	if (byte > 15)
-		return byte;
-
-	*rx_ptr = byte<<4 | nibble;
 	rx_ptr++;
+	*rx_ptr = (raw<<4) | nibble;
 
-	return PD_RX_ERR_TIMEOUT;
+	return 0;
 }
 
 int pd_rx_process(void) {
 	uint16_t sop = pd_find_preamble();
 	if (sop != PD_RX_SOP)
-		return -1;
+		return sop;
 
-	rx_ptr = (uint8_t*)raw_samples_rising;
-	// Decode header
-	pd_rx_decode_1byte();
-	pd_rx_decode_1byte();
+	// Decode the header
+	rx_ptr = raw_samples - 1;
+	if (pd_rx_decode_byte() > 15)
+		return PD_RX_ERR_INVAL;
+	if (pd_rx_decode_byte() > 15)
+		return PD_RX_ERR_INVAL;
 
-	while (pd_rx_decode_1byte()!=TABLE_5b4b_EOP);
-	GPIOB->ODR &= ~GPIO_PIN_11;
+	crc32_init();
+	uint16_t header = *((uint16_t*)raw_samples);
+	uint8_t cnt = PD_HEADER_CNT(header);
+
+	*(((uint16_t*)(&(CRC->DR)))) = header;
+
+	/* read payload data */
+	for (uint8_t p = 0; p < cnt; p++) {
+		if (pd_rx_decode_byte() > 15)
+			return PD_RX_ERR_INVAL;
+		*(((uint8_t*)(&(CRC->DR)))) = raw_samples[2+4*p];
+		if (pd_rx_decode_byte() > 15)
+			return PD_RX_ERR_INVAL;
+		*(((uint8_t*)(&(CRC->DR)))) = raw_samples[3+4*p];
+		if (pd_rx_decode_byte() > 15)
+			return PD_RX_ERR_INVAL;
+		*(((uint8_t*)(&(CRC->DR)))) = raw_samples[4+4*p];
+		if (pd_rx_decode_byte() > 15)
+			return PD_RX_ERR_INVAL;
+		*(((uint8_t*)(&(CRC->DR)))) = raw_samples[5+4*p];
+	}
+
+	uint32_t crcc = CRC->DR ^ 0xFFFFFFFF;
+
+	if (pd_rx_decode_byte() > 15)
+		return PD_RX_ERR_INVAL;
+	uint32_t crcr = (*rx_ptr);
+	if (pd_rx_decode_byte() > 15)
+		return PD_RX_ERR_INVAL;
+	crcr |= (*rx_ptr)<<8;
+	if (pd_rx_decode_byte() > 15)
+		return PD_RX_ERR_INVAL;
+	crcr |= (*rx_ptr)<<16;
+	if (pd_rx_decode_byte() > 15)
+		return PD_RX_ERR_INVAL;
+	crcr |= (*rx_ptr)<<24;
+
 	pd_rx_complete();
+	if (crcr != crcc)
+		return PD_RX_ERR_CRC;
+
+	GPIOB->ODR &= ~GPIO_PIN_11;
+
 	while(1);
 }

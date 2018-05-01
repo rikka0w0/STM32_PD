@@ -15,6 +15,9 @@ void uart_puts(const char *str);
 void uart_put(const char c);
 void uart_int32(int n);
 
+// CRC
+void crc32_init(void);
+
 // ADC
 uint16_t adc_read(uint32_t chan);
 uint16_t adc_read_temperature(void);
