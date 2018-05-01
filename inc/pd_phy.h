@@ -35,6 +35,7 @@ enum pd_rx_errors {
 	PD_RX_SOPPP = 3,
 	PD_RX_SOPP = 2,
 	PD_RX_SOP = 1,
+	PD_RX_SUCCESS = 0,
 	PD_RX_ERR_INVAL = -1,           /* Invalid packet */
 	PD_RX_ERR_HARD_RESET = -2,      /* Got a Hard-Reset packet */
 	PD_RX_ERR_CRC = -3,             /* CRC mismatch */
@@ -42,6 +43,16 @@ enum pd_rx_errors {
 	PD_RX_ERR_UNSUPPORTED_SOP = -5, /* Unsupported SOP */
 	PD_RX_ERR_CABLE_RESET = -6,      /* Got a Cable-Reset packet */
 	PD_RX_ERR_TIMEOUT = -7
+};
+
+enum pd_rx_special_4b5b {
+	TABLE_5b4b_ERR = 0x90,
+	TABLE_5b4b_SYNC1 = 0xA0,
+	TABLE_5b4b_SYNC2 = 0xB0,
+	TABLE_5b4b_SYNC3 = 0xC0,
+	TABLE_5b4b_RST1 = 0xD0,
+	TABLE_5b4b_RST2 = 0xE0,
+	TABLE_5b4b_EOP = 0xF0
 };
 
 void pd_init(void);

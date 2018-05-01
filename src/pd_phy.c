@@ -1,13 +1,49 @@
 #include "platform.h"
 #include "pd_phy.h"
 
-uint8_t raw_samples_rising[PD_BIT_LEN];
-uint8_t raw_samples_falling[PD_BIT_LEN];
-uint8_t* rising_ptr;
-uint8_t* falling_ptr;
+volatile uint8_t raw_samples_rising[PD_BIT_LEN];
+volatile uint8_t raw_samples_falling[PD_BIT_LEN];
+uint16_t rising_ptr;
+uint16_t falling_ptr;
+uint8_t* rx_ptr;
 
 static uint64_t rx_edge_ts[PD_RX_TRANSITION_COUNT];
 static int rx_edge_ts_idx;
+
+static const char dec4b5b[] = {
+/* Error    */ TABLE_5b4b_ERR /* 00000 */,
+/* Error    */ TABLE_5b4b_ERR /* 00001 */,
+/* Error    */ TABLE_5b4b_ERR /* 00010 */,
+/* Error    */ TABLE_5b4b_ERR /* 00011 */,
+/* Error    */ TABLE_5b4b_ERR /* 00100 */,
+/* Error    */ TABLE_5b4b_ERR /* 00101 */,
+/* Error    */ TABLE_5b4b_SYNC3 /* 00110 K-code: Startsynch #3*/,
+/* RST-1    */ TABLE_5b4b_RST1 /* 00111 K-code: Hard Reset #1 */,
+/* Error    */ TABLE_5b4b_ERR /* 01000 */,
+/* 1 = 0001 */ 0x01 /* 01001 */,
+/* 4 = 0100 */ 0x04 /* 01010 */,
+/* 5 = 0101 */ 0x05 /* 01011 */,
+/* Error    */ TABLE_5b4b_ERR /* 01100 */,
+/* EOP      */ TABLE_5b4b_EOP /* 01101 K-code: EOP End Of Packet */,
+/* 6 = 0110 */ 0x06 /* 01110 */,
+/* 7 = 0111 */ 0x07 /* 01111 */,
+/* Error    */ TABLE_5b4b_ERR /* 10000 */,
+/* Sync-2   */ TABLE_5b4b_SYNC2 /* 10001 K-code: Startsynch #2 */,
+/* 8 = 1000 */ 0x08 /* 10010 */,
+/* 9 = 1001 */ 0x09 /* 10011 */,
+/* 2 = 0010 */ 0x02 /* 10100 */,
+/* 3 = 0011 */ 0x03 /* 10101 */,
+/* A = 1010 */ 0x0A /* 10110 */,
+/* B = 1011 */ 0x0B /* 10111 */,
+/* Sync-1   */ TABLE_5b4b_SYNC1 /* 11000 K-code: Startsynch #1 */,
+/* RST-2    */ TABLE_5b4b_RST2 /* 11001 K-code: Hard Reset #2 */,
+/* C = 1100 */ 0x0C /* 11010 */,
+/* D = 1101 */ 0x0D /* 11011 */,
+/* E = 1110 */ 0x0E /* 11100 */,
+/* F = 1111 */ 0x0F /* 11101 */,
+/* 0 = 0000 */ 0x00 /* 11110 */,
+/* Error    */ TABLE_5b4b_ERR /* 11111 */,
+};
 
 void pd_select_cc(uint8_t cc) {
 	GPIO_InitTypeDef GPIO_InitStruct;
@@ -188,9 +224,58 @@ void pd_rx_handler(void) {
 	}
 }
 
+#define PD_RX_STATE_RMF 1	// Rising - Falling
+uint8_t pd_rx_state;
+inline static char pd_get_raw_bit(void) {
+	uint8_t diff;
+	if (pd_rx_state & PD_RX_STATE_RMF) {
+		// Wait for new rising
+		if (PD_BIT_LEN - DMA1_Channel3->CNDTR < 3 && !(TIM3->SR & 4)) {
+			while (PD_BIT_LEN - DMA1_Channel3->CNDTR < 3 && !(TIM3->SR & 4))
+				;
+			if (TIM3->SR & 4) {
+				return PD_RX_ERR_TIMEOUT;
+			}
+		}
+
+		if (raw_samples_rising[rising_ptr] > raw_samples_falling[falling_ptr]) {
+			diff = raw_samples_rising[rising_ptr]
+					- raw_samples_falling[falling_ptr];
+		} else {
+			diff = 255 - raw_samples_falling[falling_ptr];
+			diff += 1 + raw_samples_rising[rising_ptr];
+		}
+		falling_ptr++;
+		pd_rx_state &= ~PD_RX_STATE_RMF;
+	} else {
+		// Wait for new falling
+		if (PD_BIT_LEN - DMA1_Channel2->CNDTR < 3 && !(TIM3->SR & 4)) {
+			while (PD_BIT_LEN - DMA1_Channel2->CNDTR < 3 && !(TIM3->SR & 4))
+				;
+			if (TIM3->SR & 4) {
+				return PD_RX_ERR_TIMEOUT;
+			}
+		}
+
+		if (raw_samples_falling[falling_ptr] > raw_samples_rising[rising_ptr]) {
+			diff = raw_samples_falling[falling_ptr]
+					- raw_samples_rising[rising_ptr];
+		} else {
+			diff = 255 - raw_samples_rising[rising_ptr];
+			diff += 1 + raw_samples_falling[falling_ptr];
+		}
+		rising_ptr++;
+		pd_rx_state |= PD_RX_STATE_RMF;	// Next is Rising - Falling
+	}
+
+	return diff <= 30;
+}
+
 uint8_t pd_find_preamble(void) {
-	rising_ptr = ((uint8_t*)raw_samples_rising)+2; 	// DMA1_CH3, TIM3_CH4
-	falling_ptr = ((uint8_t*)raw_samples_falling)+2;	// DMA1_CH2, TIM3_CH3
+	// Rising	DMA1_CH3, TIM3_CH4
+	// Falling	DMA1_CH2, TIM3_CH3
+	rising_ptr = 2; 	// DMA1_CH3, TIM3_CH4
+	falling_ptr = 2;	// DMA1_CH2, TIM3_CH3
 
 	// Wait for two captures
 	while (((PD_BIT_LEN - DMA1_Channel2->CNDTR < 3)	|| (PD_BIT_LEN - DMA1_Channel3->CNDTR < 3))
@@ -199,47 +284,39 @@ uint8_t pd_find_preamble(void) {
 		return PD_RX_ERR_TIMEOUT;
 	}
 
-	if (*rising_ptr > *falling_ptr) {
-		rising_ptr -= 1; // Make sure *rising < * falling, See PD3.0 Spec. page 78
+	// F: 0  4 44 105
+	// R: 0 27 88 128
+	if (raw_samples_rising[rising_ptr] > raw_samples_falling[falling_ptr]) { // 94 > 51
+		// Rising is more recent
+		//See PD3.0 Spec. page 78
+		pd_rx_state |= PD_RX_STATE_RMF;
+	} else {
+		// Falling is more recent
+		pd_rx_state &= ~PD_RX_STATE_RMF;
 	}
 
 	uint32_t all = 0;
-	for (uint32_t bit = 2; bit < 60; bit++) { //
-		/* wait if the bit is not received yet ... */
-		while (((PD_BIT_LEN - DMA1_Channel2->CNDTR < bit + 1) || (PD_BIT_LEN - DMA1_Channel3->CNDTR < bit + 1))
-				&& !(TIM3->SR & 4));
-		if (TIM3->SR & 4) {
+	char curbit;
+	uint32_t bit = 2;
+	while (bit < PD_BIT_LEN) {
+		curbit = pd_get_raw_bit();
+		if (curbit < 0)
 			return PD_RX_ERR_TIMEOUT;
-		}
 
-		uint8_t diff;
-		if ((*rising_ptr) > (*(falling_ptr-1))) {
-			diff = (*rising_ptr) - (*(falling_ptr-1));
-		} else {
-			diff = 255 - (*(falling_ptr-1));
-			diff += 1 + (*rising_ptr);
-		}
-		all = (all >> 1) | (diff <= 30 ? 1 << 31 : 0);
-
-		if ((*falling_ptr) > (*rising_ptr)) {
-			diff = (*falling_ptr) - (*rising_ptr);
-		} else {
-			diff = 255 - (*rising_ptr);
-			diff += 1 + (*falling_ptr);
-		}
-		all = (all >> 1) | (diff <= 30 ? 1 << 31 : 0);
-
-
-		rising_ptr++;
-		falling_ptr++;
+		all >>= 1;
+		if (curbit)
+			all |= (1<<31);
 
 		if (all == 0xC7E3C78D) {	// SOP, Sync2 Sync1 Sync1 Sync1 101
 			return PD_RX_SOP;
-		} else if (all == 0xF33F3F3F){
+		} else if (all == 0xF33F3F3F) {
 			return PD_RX_ERR_HARD_RESET; /* got HARD-RESET */
 		} else if (all == 0x3c7fe0ff) {
 			return PD_RX_ERR_CABLE_RESET; /* got CABLE-RESET */
 		}
+
+		bit++;
+	}
 
 		/*
 		Explanation to the magic numbers:
@@ -284,19 +361,120 @@ uint8_t pd_find_preamble(void) {
 			Table 5-11 Hard Reset ordered set
 			Table 5-12 Cable Reset ordered set
 		*/
-	}
 
 	return PD_RX_ERR_INVAL;
 }
 
+char pd_rx_decode_1byte(void) {
+	uint8_t nibble = 0;
+	uint8_t byte = 0;
+	char curbit = pd_get_raw_bit();
+	if (curbit < 0)
+		return PD_RX_ERR_TIMEOUT;
+	if (curbit) {
+		nibble = 1;
+		pd_get_raw_bit();
+	}
+
+	curbit = pd_get_raw_bit();
+	if (curbit < 0)
+		return PD_RX_ERR_TIMEOUT;
+	if (curbit) {
+		nibble |= 2;
+		pd_get_raw_bit();
+	}
+
+	curbit = pd_get_raw_bit();
+	if (curbit < 0)
+		return PD_RX_ERR_TIMEOUT;
+	if (curbit) {
+		nibble |= 4;
+		pd_get_raw_bit();
+	}
+
+	curbit = pd_get_raw_bit();
+	if (curbit < 0)
+		return PD_RX_ERR_TIMEOUT;
+	if (curbit) {
+		nibble |= 8;
+		pd_get_raw_bit();
+	}
+
+	curbit = pd_get_raw_bit();
+	if (curbit < 0)
+		return PD_RX_ERR_TIMEOUT;
+	if (curbit) {
+		nibble |= 16;
+		pd_get_raw_bit();
+	}
+
+	nibble = dec4b5b[nibble];
+	if (nibble > 15)
+		return nibble;
+
+/////////////////////////////////////////
+	curbit = pd_get_raw_bit();
+	if (curbit < 0)
+		return PD_RX_ERR_TIMEOUT;
+	if (curbit) {
+		byte = 1;
+		pd_get_raw_bit();
+	}
+
+	curbit = pd_get_raw_bit();
+	if (curbit < 0)
+		return PD_RX_ERR_TIMEOUT;
+	if (curbit) {
+		byte |= 2;
+		pd_get_raw_bit();
+	}
+
+	curbit = pd_get_raw_bit();
+	if (curbit < 0)
+		return PD_RX_ERR_TIMEOUT;
+	if (curbit) {
+		byte |= 4;
+		pd_get_raw_bit();
+	}
+
+	curbit = pd_get_raw_bit();
+	if (curbit < 0)
+		return PD_RX_ERR_TIMEOUT;
+	if (curbit) {
+		byte |= 8;
+		pd_get_raw_bit();
+	}
+
+	curbit = pd_get_raw_bit();
+	if (curbit < 0)
+		return PD_RX_ERR_TIMEOUT;
+	if (curbit) {
+		byte |= 16;
+		pd_get_raw_bit();
+	}
+
+	byte = dec4b5b[byte];
+	if (byte > 15)
+		return byte;
+
+	*rx_ptr = byte<<4 | nibble;
+	rx_ptr++;
+
+	return PD_RX_ERR_TIMEOUT;
+}
+
 int pd_rx_process(void) {
-	uint8_t bit = pd_find_preamble();
-	if (bit != PD_RX_SOP)
+	uint16_t sop = pd_find_preamble();
+	if (sop != PD_RX_SOP)
 		return -1;
 
+	rx_ptr = (uint8_t*)raw_samples_rising;
+	// Decode header
+	pd_rx_decode_1byte();
+	pd_rx_decode_1byte();
 
-	//pd_rx_complete();
-	int l1 = rising_ptr - (uint8_t*)raw_samples_rising;
-	int l2 = falling_ptr - (uint8_t*)raw_samples_falling;
+	while (pd_rx_decode_1byte()!=TABLE_5b4b_EOP);
+	GPIOB->ODR &= ~GPIO_PIN_11;
+	pd_rx_complete();
 	while(1);
 }
