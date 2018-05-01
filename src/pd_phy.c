@@ -1,10 +1,10 @@
 #include "platform.h"
 #include "pd_phy.h"
 
-uint16_t raw_samples_rising[PD_BIT_LEN];
-uint16_t raw_samples_falling[PD_BIT_LEN];
-uint16_t* rising_ptr;
-uint16_t* falling_ptr;
+uint8_t raw_samples_rising[PD_BIT_LEN];
+uint8_t raw_samples_falling[PD_BIT_LEN];
+uint8_t* rising_ptr;
+uint8_t* falling_ptr;
 
 static uint64_t rx_edge_ts[PD_RX_TRANSITION_COUNT];
 static int rx_edge_ts_idx;
@@ -69,7 +69,6 @@ void pd_init(void) {
 	TIM3->PSC = (48000000 / 12000000) - 1; // Prescaler = fAPB1_Timer / 12MHz - 1;
 	TIM3->CCR2 = (12000000 / 1000) * USB_PD_RX_TMOUT_US / 1000;	// Channel 2 - Timeout = 21600 Ticks
 
-	TIM3->DCR = 0x700; // burst len = 2
 	// RM0091 page 449, IC3=TI4FP3 input, IC4 = TI4FP4 input
 	TIM3->CCMR2 = 0x102;
 	// RM0091 page 450, CC3E=CC4E=1, Capture enabled
@@ -130,12 +129,12 @@ void pd_rx_start() {
 	DMA1->IFCR = 0xFF0;
 
 	// Priority very high, MSIZE=16, PSIZE=16, Memory increment mode
-	DMA1_Channel2->CCR = 0x3580;
+	DMA1_Channel2->CCR = 0x3180;
 	DMA1_Channel2->CNDTR = PD_BIT_LEN;
 	DMA1_Channel2->CPAR = &(TIM3->CCR3);
 	DMA1_Channel2->CMAR = (uint32_t)raw_samples_falling;
 
-	DMA1_Channel3->CCR = 0x3580;
+	DMA1_Channel3->CCR = 0x3180;
 	DMA1_Channel3->CNDTR = PD_BIT_LEN;
 	DMA1_Channel3->CPAR = &(TIM3->CCR4);
 	DMA1_Channel3->CMAR = (uint32_t)raw_samples_rising;
@@ -190,8 +189,8 @@ void pd_rx_handler(void) {
 }
 
 uint8_t pd_find_preamble(void) {
-	rising_ptr = raw_samples_rising+2; 	// DMA1_CH3, TIM3_CH4
-	falling_ptr = raw_samples_falling+2;	// DMA1_CH2, TIM3_CH3
+	rising_ptr = ((uint8_t*)raw_samples_rising)+2; 	// DMA1_CH3, TIM3_CH4
+	falling_ptr = ((uint8_t*)raw_samples_falling)+2;	// DMA1_CH2, TIM3_CH3
 
 	// Wait for two captures
 	while (((PD_BIT_LEN - DMA1_Channel2->CNDTR < 3)	|| (PD_BIT_LEN - DMA1_Channel3->CNDTR < 3))
@@ -213,8 +212,23 @@ uint8_t pd_find_preamble(void) {
 			return PD_RX_ERR_TIMEOUT;
 		}
 
-		all = (all >> 1) | ((*rising_ptr) - (*(falling_ptr-1)) <= 30 ? 1 << 31 : 0);
-		all = (all >> 1) | ((*falling_ptr) - (*rising_ptr) <= 30 ? 1 << 31 : 0);
+		uint8_t diff;
+		if ((*rising_ptr) > (*(falling_ptr-1))) {
+			diff = (*rising_ptr) - (*(falling_ptr-1));
+		} else {
+			diff = 255 - (*(falling_ptr-1));
+			diff += 1 + (*rising_ptr);
+		}
+		all = (all >> 1) | (diff <= 30 ? 1 << 31 : 0);
+
+		if ((*falling_ptr) > (*rising_ptr)) {
+			diff = (*falling_ptr) - (*rising_ptr);
+		} else {
+			diff = 255 - (*rising_ptr);
+			diff += 1 + (*falling_ptr);
+		}
+		all = (all >> 1) | (diff <= 30 ? 1 << 31 : 0);
+
 
 		rising_ptr++;
 		falling_ptr++;
@@ -281,8 +295,8 @@ int pd_rx_process(void) {
 		return -1;
 
 
-	pd_rx_complete();
-	int l1 = rising_ptr - raw_samples_rising;
-	int l2 = falling_ptr - raw_samples_falling;
+	//pd_rx_complete();
+	int l1 = rising_ptr - (uint8_t*)raw_samples_rising;
+	int l2 = falling_ptr - (uint8_t*)raw_samples_falling;
 	while(1);
 }
