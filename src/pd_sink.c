@@ -79,6 +79,17 @@ __weak void pd_cc_disconnected(void) {
 	uart_puts("CC disconnected\n");
 }
 
+// This delay quits as soon as rx starts
+void pd_delay(uint32_t wait) {
+  uint32_t tickstart = HAL_GetTick();
+
+  /* Add a period to guarantee minimum wait */
+  if (wait < HAL_MAX_DELAY)
+     wait++;
+
+  while((HAL_GetTick() - tickstart) < wait && !pd_rx_started());
+}
+
 void pd_sink_run(void) {
 	static uint32_t last_tick;
 
@@ -122,7 +133,9 @@ void pd_sink_run(void) {
 		} else {
 			if ((pd_port_status & PD_CC_MASK) == PD_CC_1) {
 				if (pd_detect_cc(PD_CC_1) == PD_ICAP_NC) {
-					HAL_Delay(1);
+					pd_delay(10);
+					if (pd_rx_started())
+						return;
 					if (pd_detect_cc(PD_CC_1) == PD_ICAP_NC) {
 						pd_port_status &=~ (PD_CC_MASK|PD_PORTSTATE_MASK);
 						pd_port_status |= PD_CC_NC | PD_PORTSTATE_DISCONNECTED;
@@ -131,7 +144,9 @@ void pd_sink_run(void) {
 				}
 			} else if ((pd_port_status & PD_CC_MASK) == PD_CC_2) {
 				if (pd_detect_cc(PD_CC_2) == PD_ICAP_NC) {
-					HAL_Delay(1);
+					pd_delay(10);
+					if (pd_rx_started())
+						return;
 					if (pd_detect_cc(PD_CC_2) == PD_ICAP_NC) {
 						pd_port_status &=~ (PD_CC_MASK|PD_PORTSTATE_MASK);
 						pd_port_status |= PD_CC_NC | PD_PORTSTATE_DISCONNECTED;

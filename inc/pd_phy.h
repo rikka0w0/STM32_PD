@@ -32,6 +32,9 @@
 #define PD_RX_THRESHOLD 30	// @ 12 MHz Timer rate
 
 enum pd_rx_errors {
+	PD_RX_SOPPP = 3,
+	PD_RX_SOPP = 2,
+	PD_RX_SOP = 1,
 	PD_RX_ERR_INVAL = -1,           /* Invalid packet */
 	PD_RX_ERR_HARD_RESET = -2,      /* Got a Hard-Reset packet */
 	PD_RX_ERR_CRC = -3,             /* CRC mismatch */
@@ -46,6 +49,6 @@ void pd_select_cc(uint8_t cc);
 void pd_rx_disable_monitoring(void);
 void pd_rx_enable_monitoring(void);
 uint32_t pd_rx_started(void);
-void pd_rx_process(void);
+int pd_rx_process(void);
 
 #endif // __PD_PHY_H

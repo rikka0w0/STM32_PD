@@ -3,6 +3,8 @@
 
 uint16_t raw_samples_rising[PD_BIT_LEN];
 uint16_t raw_samples_falling[PD_BIT_LEN];
+uint16_t* rising_ptr;
+uint16_t* falling_ptr;
 
 static uint64_t rx_edge_ts[PD_RX_TRANSITION_COUNT];
 static int rx_edge_ts_idx;
@@ -58,7 +60,6 @@ void pd_init(void) {
 	HAL_NVIC_EnableIRQ(EXTI0_1_IRQn);
 
 	// TIM3
-
     __HAL_RCC_TIM3_CLK_ENABLE();
 	/* --- set counter for RX timing : 12Mhz rate, free-running --- */
 	TIM3->CR1 = 0x0000;
@@ -68,7 +69,7 @@ void pd_init(void) {
 	TIM3->PSC = (48000000 / 12000000) - 1; // Prescaler = fAPB1_Timer / 12MHz - 1;
 	TIM3->CCR2 = (12000000 / 1000) * USB_PD_RX_TMOUT_US / 1000;	// Channel 2 - Timeout = 21600 Ticks
 
-	TIM3->DCR = 0x300; // burst len = 4
+	TIM3->DCR = 0x700; // burst len = 2
 	// RM0091 page 449, IC3=TI4FP3 input, IC4 = TI4FP4 input
 	TIM3->CCMR2 = 0x102;
 	// RM0091 page 450, CC3E=CC4E=1, Capture enabled
@@ -142,12 +143,11 @@ void pd_rx_start() {
 	/* Flush data in write buffer so that DMA can get the lastest data */
 	asm volatile("dsb;");
 
-
-
 	// Enable DMA
 	DMA1_Channel2->CCR |= 0x01;
 	DMA1_Channel3->CCR |= 0x01;
 
+	TIM3->CNT = 0;
 	TIM3->EGR = 0x0001;	// UG = 1
 	TIM3->SR = 0; // Clear flags
 	TIM3->CR1 |= 1; // Enable Timer
@@ -169,6 +169,7 @@ void pd_rx_handler(void) {
 		if ((rx_edge_ts[rx_edge_ts_idx] -
 		     rx_edge_ts[next_idx])
 		     < PD_RX_TRANSITION_WINDOW) {
+
 			/*
 			 * ignore the comparator IRQ until we are done
 			 * with current message
@@ -188,9 +189,9 @@ void pd_rx_handler(void) {
 	}
 }
 
-int pd_find_preamble(void) {
-	uint16_t* rising = raw_samples_rising;		// DMA1_CH3, TIM3_CH4
-	// raw_samples_falling DMA1_CH2, TIM3_CH3
+uint8_t pd_find_preamble(void) {
+	rising_ptr = raw_samples_rising+2; 	// DMA1_CH3, TIM3_CH4
+	falling_ptr = raw_samples_falling+2;	// DMA1_CH2, TIM3_CH3
 
 	// Wait for two captures
 	while (((PD_BIT_LEN - DMA1_Channel2->CNDTR < 3)	|| (PD_BIT_LEN - DMA1_Channel3->CNDTR < 3))
@@ -199,8 +200,8 @@ int pd_find_preamble(void) {
 		return PD_RX_ERR_TIMEOUT;
 	}
 
-	if (rising[2] > raw_samples_falling[2]) {
-		rising -= 1; // Make sure *rising < * falling, See PD3.0 Spec. page 78
+	if (*rising_ptr > *falling_ptr) {
+		rising_ptr -= 1; // Make sure *rising < * falling, See PD3.0 Spec. page 78
 	}
 
 	uint32_t all = 0;
@@ -209,15 +210,17 @@ int pd_find_preamble(void) {
 		while (((PD_BIT_LEN - DMA1_Channel2->CNDTR < bit + 1) || (PD_BIT_LEN - DMA1_Channel3->CNDTR < bit + 1))
 				&& !(TIM3->SR & 4));
 		if (TIM3->SR & 4) {
-			return PD_RX_ERR_TIMEOUT-1;
+			return PD_RX_ERR_TIMEOUT;
 		}
 
-		all = (all >> 1) | (rising[bit] - raw_samples_falling[bit - 1] <= 30 ? 1 << 31 : 0);
+		all = (all >> 1) | ((*rising_ptr) - (*(falling_ptr-1)) <= 30 ? 1 << 31 : 0);
+		all = (all >> 1) | ((*falling_ptr) - (*rising_ptr) <= 30 ? 1 << 31 : 0);
 
-		all = (all >> 1) | (raw_samples_falling[bit] - rising[bit] <= 30 ? 1 << 31 : 0);
+		rising_ptr++;
+		falling_ptr++;
 
-		if (all == 0x36db6db6) {
-			return bit - 1;
+		if (all == 0xC7E3C78D) {	// SOP, Sync2 Sync1 Sync1 Sync1 101
+			return PD_RX_SOP;
 		} else if (all == 0xF33F3F3F){
 			return PD_RX_ERR_HARD_RESET; /* got HARD-RESET */
 		} else if (all == 0x3c7fe0ff) {
@@ -272,9 +275,14 @@ int pd_find_preamble(void) {
 	return PD_RX_ERR_INVAL;
 }
 
-void pd_rx_process(void) {
-	int isr = TIM3->SR;
-	int ret = pd_find_preamble();
+int pd_rx_process(void) {
+	uint8_t bit = pd_find_preamble();
+	if (bit != PD_RX_SOP)
+		return -1;
+
+
 	pd_rx_complete();
+	int l1 = rising_ptr - raw_samples_rising;
+	int l2 = falling_ptr - raw_samples_falling;
 	while(1);
 }
