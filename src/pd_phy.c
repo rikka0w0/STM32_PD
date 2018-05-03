@@ -1,9 +1,12 @@
 #include "platform.h"
 #include "pd_phy.h"
 
+#define DIV_ROUND_UP(x, y) (((x) + ((y) - 1)) / (y))
+#define TX_CLOCK_DIV 48000000 / (2*300000) // Tx Clock = 2 x bit rate of BMC
+
 uint32_t raw_samples_buf[PD_MAX_RAW_SIZE/4];
 uint8_t* raw_samples;
-uint16_t raw_ptr;
+uint16_t raw_ptr;	// Current Pos in Rx and number of raw bits in Tx
 uint8_t* rx_ptr;
 
 static uint64_t rx_edge_ts[PD_RX_TRANSITION_COUNT];
@@ -69,6 +72,35 @@ void pd_select_cc(uint8_t cc) {
 	}
 }
 
+void pd_set_tx_pin(uint8_t cc) {
+	GPIO_InitTypeDef GPIO_InitStruct;
+	if (cc == PD_CC_1) {	// PA6 - Tx
+	    GPIO_InitStruct.Pin = GPIO_PIN_4;
+	    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+	    GPIO_InitStruct.Pull = GPIO_NOPULL;
+	    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+	    GPIO_InitStruct.Alternate = GPIO_AF0_SPI1;
+	    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+	} else if (cc == PD_CC_2) {	// PB4 - Tx
+	    GPIO_InitStruct.Pin = GPIO_PIN_6;
+	    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+	    GPIO_InitStruct.Pull = GPIO_NOPULL;
+	    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+	    GPIO_InitStruct.Alternate = GPIO_AF0_SPI1;
+	    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+	} else {
+		// PA6, PB4 to Hi-Z
+	    GPIO_InitStruct.Pin = GPIO_PIN_6;
+	    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+	    GPIO_InitStruct.Pull = GPIO_NOPULL;
+	    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+	    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+	    GPIO_InitStruct.Pin = GPIO_PIN_4;
+	    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+	}
+}
+
 void pd_init(void) {
 	GPIO_InitTypeDef GPIO_InitStruct;
 
@@ -118,6 +150,36 @@ void pd_init(void) {
 
 	// DMA
 	__HAL_RCC_DMA1_CLK_ENABLE();
+
+	// Tx Timer (Supplies clock to Half-duplex SPI)
+    GPIO_InitStruct.Pin = GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF4_TIM14;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+	__HAL_RCC_TIM14_CLK_ENABLE();
+	TIM14->CR1 = 0x0000;
+	TIM14->DIER = 0x0000;
+	TIM14->ARR = TX_CLOCK_DIV;	// Auto-reload value : 600000 Khz overflow
+	TIM14->PSC = 0;
+	TIM14->CCR1 = TIM14->ARR / 2; // 50% duty cycle
+
+	TIM14->CCMR1 = 0x68;	// 110: PWM mode 1, up counting. 0x08: enable reload
+	TIM14->CCER = 1; 		// CH1 output enable
+	TIM14->EGR = 1;			// UG=1, Reinitialize the counter and generates an update of the registers
+
+	// Tx SPI
+	__HAL_RCC_SPI1_CLK_ENABLE();
+    GPIO_InitStruct.Pin = GPIO_PIN_5;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF0_SPI1;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    pd_set_tx_pin(0);
 }
 
 void pd_rx_enable_monitoring(void) {
@@ -161,19 +223,19 @@ void pd_rx_start() {
 	// Disable DMA
 	DMA1_Channel3->CCR = 0;
 	// Clear ISR
-	DMA1->IFCR = 0xFF0;
+	DMA1->IFCR = 0xF00;
 
-	// Priority very high, MSIZE=16, PSIZE=16, Memory increment mode
-	DMA1_Channel3->CCR = 0x3180;
+	// Priority very high, MSIZE=8, PSIZE=16, Memory increment mode
+	DMA1_Channel3->CCR = (3<<DMA_CCR_PL_Pos) | (0<<DMA_CCR_MSIZE_Pos) | (1<<DMA_CCR_PSIZE_Pos) | DMA_CCR_MINC;
 	DMA1_Channel3->CNDTR = PD_MAX_RAW_SIZE;
-	DMA1_Channel3->CPAR = &(TIM3->CCR4);
+	DMA1_Channel3->CPAR = (uint32_t)(&(TIM3->CCR4));
 	DMA1_Channel3->CMAR = (uint32_t)raw_samples;
 
 	/* Flush data in write buffer so that DMA can get the lastest data */
 	asm volatile("dsb;");
 
 	// Enable DMA
-	DMA1_Channel3->CCR |= 0x01;
+	DMA1_Channel3->CCR |= DMA_CCR_EN;
 
 	TIM3->CNT = 0;
 	TIM3->EGR = 0x0001;	// UG = 1
@@ -430,4 +492,66 @@ int pd_rx_process(void) {
 	GPIOB->ODR &= ~GPIO_PIN_11;
 
 	while(1);
+}
+
+char pd_tx(void) {
+	pd_rx_disable_monitoring();
+
+	if (pd_rx_started())
+		return -1;
+
+	// Initialize SPI ----------------------------------------------------------------
+	SPI1->CR2 = SPI_CR2_TXDMAEN | (7<<SPI_CR2_DS_Pos); // Enable DMA, 8 data bit
+	// Enable the slave SPI: LSB first, force NSS, TX only, CPHA
+	// When the SSM bit is set, the NSS pin input is replaced with the value from the SSI bit.
+	// BIDIMODE: 1: 1-line bidirectional data mode selected
+	// BIDIOE: 1: Output enabled (transmit-only mode) otherwise receive-only mode
+	// CPHA: 1: The second clock transition is the first data capture edge
+	SPI1->CR1 =	SPI_CR1_SPE | SPI_CR1_LSBFIRST
+			 | SPI_CR1_SSM | SPI_CR1_BIDIMODE
+			 | SPI_CR1_BIDIOE | SPI_CR1_CPHA; ;
+
+	/*
+	 * Set timer to one tick before reset so that the first tick causes
+	 * a rising edge on the output.
+	 */
+	TIM14->CNT = TX_CLOCK_DIV - 1;
+
+	// Prepare DMA -------------------------------------------------------------------
+	// Disable DMA
+	DMA1_Channel3->CCR = 0;
+	// Clear ISR
+	DMA1->IFCR = 0xF00;
+	// Priority very high, MSIZE=8, PSIZE=8, Memory increment mode, Memory->Peripheral
+	DMA1_Channel3->CCR = (3<<DMA_CCR_PL_Pos) | (0<<DMA_CCR_MSIZE_Pos) | (0<<DMA_CCR_PSIZE_Pos) | DMA_CCR_MINC | DMA_CCR_DIR;
+	DMA1_Channel3->CNDTR = DIV_ROUND_UP(raw_ptr, 8);
+	DMA1_Channel3->CPAR = (uint32_t)(&(SPI1->DR));
+	DMA1_Channel3->CMAR = (uint32_t)raw_samples;
+	// Flush data in write buffer so that DMA can get the lastest data
+	asm volatile("dsb;");
+	// Enable DMA
+	DMA1_Channel3->CCR |= DMA_CCR_EN;
+
+	// Enable Tx Pin
+	pd_set_tx_pin(pd_get_last_cc());
+
+	// Start PD Tx clock
+	TIM14->CR1 |= TIM_CR1_CEN;
+
+
+	while (SPI1->SR & SPI_SR_FTLVL)
+		; /* wait for TX FIFO empty */
+	while (SPI1->SR & SPI_SR_BSY)
+		; /* wait for BSY == 0 */
+
+	// Stop PD Tx clock
+	TIM14->CR1 &= ~TIM_CR1_CEN;
+
+	// Put TX pins in Hi-Z
+	pd_set_tx_pin(0);
+
+	__HAL_RCC_SPI1_FORCE_RESET();
+	__HAL_RCC_SPI1_RELEASE_RESET();
+
+	return 0;
 }

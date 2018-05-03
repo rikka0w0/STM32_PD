@@ -65,9 +65,14 @@ enum pd_rx_special_4b5b {
 
 void pd_init(void);
 void pd_select_cc(uint8_t cc);
+
 void pd_rx_disable_monitoring(void);
 void pd_rx_enable_monitoring(void);
 uint32_t pd_rx_started(void);
 int pd_rx_process(void);
+
+char pd_tx_start();
+
+uint8_t pd_get_last_cc(void);
 
 #endif // __PD_PHY_H

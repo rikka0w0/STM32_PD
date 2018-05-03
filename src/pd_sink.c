@@ -27,6 +27,10 @@
 
 volatile uint32_t pd_port_status;
 
+uint8_t pd_get_last_cc() {
+	return pd_port_status & PD_CC_MASK;
+}
+
 // Detect CC line and return advertised current capacity, Return PD_ICAP_XXX
 uint8_t pd_detect_cc(uint8_t cc) {
 	uint16_t adc_val;
