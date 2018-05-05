@@ -16,6 +16,8 @@
 #define PD_CC_2		0x02
 #define PD_CC_UNDEF	PD_CC_MASK
 
+#define PD_REV 1	// PD2.0 spec.
+
 /*
  * Maximum size of a Power Delivery packet (in bits on the wire) :
  *    16-bit header + 0..7 32-bit data objects  (+ 4b5b encoding)

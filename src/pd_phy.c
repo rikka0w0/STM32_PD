@@ -315,7 +315,7 @@ void pd_rx_complete() {
 	DMA1_Channel3->CCR = 0;
 }
 
-void pd_rx_start() {
+void pd_rx_start() {GPIOB->ODR &= ~GPIO_PIN_11;
 	raw_samples = (uint8_t*) raw_samples_buf;
 
 	// Comparator GPIO -> Alternate function mode (for TIM3_CH4)
@@ -602,10 +602,9 @@ int pd_rx_process(void) {
 	if (crcr != crcc)
 		return PD_RX_ERR_CRC;
 
-	GPIOB->ODR &= ~GPIO_PIN_11;
 	uint8_t id = PD_HEADER_ID(header);
 	header = PD_HEADER(1, 0,	// Sink
-			0, id, 0, 0, 0);	// UFP
+			0, id, 0, PD_REV, 0);	// UFP
 
 	pd_prepare_message(header, 0, 0);
 
