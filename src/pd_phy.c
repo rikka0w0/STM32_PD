@@ -249,8 +249,6 @@ void pd_init(void) {
 	// RM0091 page 450, CC4E=1, Capture enabled
 	// CC4NP=1, CC4P=1, IC4 falling/rising
 	TIM3->CCER = 0xB000;
-	// RM0091 page 441, Enable DMA request for IC4
-	TIM3->DIER = 0x1000;
 	// RM0091 page 444, Enable update CC4 generation
 	TIM3->EGR = 0x11;
 	// RM0091 page 442, Clear flags
@@ -312,6 +310,7 @@ uint32_t pd_rx_started(void) {
 void pd_rx_complete() {
 	/* stop stampling TIM2 */
 	TIM3->CR1 &= ~1; // CEN = 0;
+	TIM3->DIER = 0; // Disable any possible interrupt / DMA request
 	// Disable DMA
 	DMA1_Channel3->CCR = 0;
 }
@@ -332,6 +331,9 @@ void pd_rx_start() {
 	DMA1_Channel3->CCR = 0;
 	// Clear ISR
 	DMA1->IFCR = 0xF00;
+
+	// RM0091 page 441, Enable DMA request for IC4
+	TIM3->DIER = 0x1000;
 
 	// Priority very high, MSIZE=8, PSIZE=16, Memory increment mode
 	DMA1_Channel3->CCR = (3<<DMA_CCR_PL_Pos) | (0<<DMA_CCR_MSIZE_Pos) | (1<<DMA_CCR_PSIZE_Pos) | DMA_CCR_MINC;
@@ -543,9 +545,12 @@ char pd_rx_decode_byte(void) {
 
 	return 0;
 }
-
+uint8_t ent=0;
 int pd_rx_process(void) {
+	ent++;
 	uint16_t sop = pd_find_preamble();
+	if (ent==2)
+		while(1);
 	if (sop != PD_RX_SOP)
 		return sop;
 
@@ -608,7 +613,8 @@ int pd_rx_process(void) {
 		/* another packet recvd before we could send goodCRC */
 		return PD_RX_ERR_INVAL;
 
-	while(1);
+	pd_rx_enable_monitoring();
+	return 0;
 }
 
 char pd_tx(void) {
@@ -631,8 +637,6 @@ char pd_tx(void) {
 			 | SPI_CR1_SSM | SPI_CR1_BIDIMODE
 			 | SPI_CR1_BIDIOE | SPI_CR1_CPHA | SPI_CR1_SSI ;
 
-
-
 	/*
 	 * Set timer to one tick before reset so that the first tick causes
 	 * a rising edge on the output.
@@ -649,6 +653,7 @@ char pd_tx(void) {
 	DMA1_Channel3->CNDTR = DIV_ROUND_UP(raw_ptr, 8);
 	DMA1_Channel3->CPAR = (uint32_t)(&(SPI1->DR));
 	DMA1_Channel3->CMAR = (uint32_t)raw_samples_buf;
+
 	// Flush data in write buffer so that DMA can get the lastest data
 	asm volatile("dmb;");
 	DMA1->IFCR = 0xF00;
@@ -786,7 +791,7 @@ void pd_test_tx(void) {
 	pd_select_cc(PD_CC_1);
 
 	while (GPIOB->IDR & GPIO_PIN_15);
-
+	GPIOB->ODR &= ~GPIO_PIN_11;
 
 	uint16_t header = PD_HEADER(1, 0,	// Sink
 			0, 3, 0, 0, 0);	// UFP
