@@ -545,12 +545,10 @@ char pd_rx_decode_byte(void) {
 
 	return 0;
 }
-uint8_t ent=0;
+uint8_t ent=0;uint32_t msgreq = 0x230320C8;
 int pd_rx_process(void) {
 	ent++;
 	uint16_t sop = pd_find_preamble();
-	if (ent==2)
-		while(1);
 	if (sop != PD_RX_SOP)
 		return sop;
 
@@ -602,12 +600,24 @@ int pd_rx_process(void) {
 	if (crcr != crcc)
 		return PD_RX_ERR_CRC;
 
+	if (ent==2)
+		while(1);
+
 	uint8_t id = PD_HEADER_ID(header);
 	header = PD_HEADER(1, 0,	// Sink
 			0, id, 0, PD_REV, 0);	// UFP
 
 	pd_prepare_message(header, 0, 0);
 
+	if (pd_tx() < 0)
+		/* another packet recvd before we could send goodCRC */
+		return PD_RX_ERR_INVAL;
+
+	HAL_Delay(2);
+//	header = PD_HEADER(2, 0,	// Sink
+//			0, 0, 0, PD_REV, 0);	// UFP
+	header= 0x1042;
+	pd_prepare_message(header, 1, &msgreq);
 	if (pd_tx() < 0)
 		/* another packet recvd before we could send goodCRC */
 		return PD_RX_ERR_INVAL;
