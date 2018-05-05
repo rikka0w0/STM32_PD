@@ -32,6 +32,12 @@
 #define USB_PD_RX_TMOUT_US 1800
 #define PD_RX_THRESHOLD 30	// @ 12 MHz Timer rate
 
+/* build message header */
+#define PD_HEADER(type, prole, drole, id, cnt, rev, ext) \
+	((type) | ((rev) << 6) | \
+	((drole) << 5) | ((prole) << 8) | \
+	((id) << 9) | ((cnt) << 12) | ((ext) << 15))
+
 /* Used for processing pd header */
 #define PD_HEADER_EXT(header)  (((header) >> 15) & 1)
 #define PD_HEADER_CNT(header)  (((header) >> 12) & 7)
@@ -71,8 +77,7 @@ void pd_rx_enable_monitoring(void);
 uint32_t pd_rx_started(void);
 int pd_rx_process(void);
 
-char pd_tx_start();
-
-uint8_t pd_get_last_cc(void);
+char pd_tx(void);
+void pd_prepare_message(uint16_t header, uint8_t cnt, const uint32_t *data);
 
 #endif // __PD_PHY_H

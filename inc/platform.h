@@ -17,6 +17,10 @@ void uart_int32(int n);
 
 // CRC
 void crc32_init(void);
+#define crc32_hash8(dat) (*(((uint8_t*)(&(CRC->DR)))) = dat)
+#define crc32_hash16(dat) (*(((uint16_t*)(&(CRC->DR)))) = dat)
+#define crc32_hash32(dat) (*(((uint32_t*)(&(CRC->DR)))) = dat)
+#define crc32_result() (CRC->DR ^ 0xFFFFFFFF)
 
 // ADC
 uint16_t adc_read(uint32_t chan);
