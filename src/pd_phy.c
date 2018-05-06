@@ -1,6 +1,9 @@
 #include "platform.h"
 #include "pd_phy.h"
 
+#define PD_RX_DMA_CHANNEL DMA1_Channel3		// TIM3_CH4
+#define PD_TX_DMA_CHANNEL DMA1_Channel3		// SPI1_Tx
+
 #define DIV_ROUND_UP(x, y) (((x) + ((y) - 1)) / (y))
 #define TX_CLOCK_DIV 48000000 / (2*300000) // Tx Clock = 2 x bit rate of BMC
 
@@ -8,6 +11,7 @@ uint32_t raw_samples_buf[PD_MAX_RAW_SIZE/4];
 uint8_t* raw_samples;
 uint16_t raw_ptr;	// Current Pos in Rx and number of raw bits in Tx
 uint8_t* rx_ptr;
+static int b_toggle;	// Records bit sequences during Tx
 static uint8_t pd_selected_cc;
 
 static uint64_t rx_edge_ts[PD_RX_TRANSITION_COUNT];
@@ -196,7 +200,7 @@ uint32_t pd_set_tx_pin(uint8_t cc) {
 
 			PD_CC_GPIO->ODR |= GPIO_PIN_2;
 		    PD_CC_GPIO->MODER &= ~GPIO_MODER_MODER2;
-		    PD_CC_GPIO->MODER |= (3<<GPIO_MODER_MODER2_Pos); // PA4 -> Analog mode
+		    PD_CC_GPIO->MODER |= (3<<GPIO_MODER_MODER2_Pos); // PA2 -> Analog mode
 	    } else if (last_cc == PD_CC_2) {
 	    	last_cc = 0;
 
@@ -312,7 +316,7 @@ void pd_rx_complete() {
 	TIM3->CR1 &= ~1; // CEN = 0;
 	TIM3->DIER = 0; // Disable any possible interrupt / DMA request
 	// Disable DMA
-	DMA1_Channel3->CCR = 0;
+	PD_RX_DMA_CHANNEL->CCR = 0;
 }
 
 void pd_rx_start() {GPIOB->ODR &= ~GPIO_PIN_11;
@@ -328,7 +332,7 @@ void pd_rx_start() {GPIOB->ODR &= ~GPIO_PIN_11;
     HAL_GPIO_Init(PD_COMP_GPIO, &GPIO_InitStruct);
 
 	// Disable DMA
-	DMA1_Channel3->CCR = 0;
+	PD_RX_DMA_CHANNEL->CCR = 0;
 	// Clear ISR
 	DMA1->IFCR = 0xF00;
 
@@ -336,16 +340,16 @@ void pd_rx_start() {GPIOB->ODR &= ~GPIO_PIN_11;
 	TIM3->DIER = 0x1000;
 
 	// Priority very high, MSIZE=8, PSIZE=16, Memory increment mode
-	DMA1_Channel3->CCR = (3<<DMA_CCR_PL_Pos) | (0<<DMA_CCR_MSIZE_Pos) | (1<<DMA_CCR_PSIZE_Pos) | DMA_CCR_MINC;
-	DMA1_Channel3->CNDTR = PD_MAX_RAW_SIZE;
-	DMA1_Channel3->CPAR = (uint32_t)(&(TIM3->CCR4));
-	DMA1_Channel3->CMAR = (uint32_t)raw_samples;
+	PD_RX_DMA_CHANNEL->CCR = (3<<DMA_CCR_PL_Pos) | (0<<DMA_CCR_MSIZE_Pos) | (1<<DMA_CCR_PSIZE_Pos) | DMA_CCR_MINC;
+	PD_RX_DMA_CHANNEL->CNDTR = PD_MAX_RAW_SIZE;
+	PD_RX_DMA_CHANNEL->CPAR = (uint32_t)(&(TIM3->CCR4));
+	PD_RX_DMA_CHANNEL->CMAR = (uint32_t)raw_samples;
 
 	/* Flush data in write buffer so that DMA can get the lastest data */
 	asm volatile("dsb;");
 
 	// Enable DMA
-	DMA1_Channel3->CCR |= DMA_CCR_EN;
+	PD_RX_DMA_CHANNEL->CCR |= DMA_CCR_EN;
 
 	TIM3->CNT = 0;
 	TIM3->EGR = 0x0001;	// UG = 1
@@ -395,8 +399,8 @@ uint8_t pd_find_preamble(void) {
 	uint32_t all = 0;
 	raw_ptr = 2;
 	while (raw_ptr < PD_BIT_LEN) {
-		if ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)) {
-			while ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)
+		if ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)) {
+			while ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)
 					&& !(TIM3->SR & 4));
 			if (TIM3->SR & 4) {
 				return PD_RX_ERR_TIMEOUT;
@@ -476,8 +480,8 @@ char pd_rx_decode_byte(void) {
 	uint8_t cnt;
 
 	for (uint8_t bit=0; bit<5; bit++) {
-		if ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)) {
-			while ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)
+		if ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)) {
+			while ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)
 					&& !(TIM3->SR & 4));
 			if (TIM3->SR & 4) {
 				return PD_RX_ERR_TIMEOUT;
@@ -492,8 +496,8 @@ char pd_rx_decode_byte(void) {
 		raw_ptr++;
 		if (cnt <= PD_RX_THRESHOLD) {
 			raw |= 1 << bit;
-			if ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)) {
-				while ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)
+			if ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)) {
+				while ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)
 						&& !(TIM3->SR & 4));
 				if (TIM3->SR & 4) {
 					return PD_RX_ERR_TIMEOUT;
@@ -509,8 +513,8 @@ char pd_rx_decode_byte(void) {
 
 	raw = 0;
 	for (uint8_t bit=5; bit<10; bit++) {
-		if ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)) {
-			while ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)
+		if ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)) {
+			while ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)
 					&& !(TIM3->SR & 4));
 			if (TIM3->SR & 4) {
 				return PD_RX_ERR_TIMEOUT;
@@ -525,8 +529,8 @@ char pd_rx_decode_byte(void) {
 		raw_ptr++;
 		if (cnt <= PD_RX_THRESHOLD) {
 			raw |= 1 << (bit-5);
-			if ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)) {
-				while ((PD_MAX_RAW_SIZE - DMA1_Channel3->CNDTR < raw_ptr + 1)
+			if ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)) {
+				while ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)
 						&& !(TIM3->SR & 4));
 				if (TIM3->SR & 4) {
 					return PD_RX_ERR_TIMEOUT;
@@ -654,21 +658,21 @@ char pd_tx(void) {
 
 	// Prepare DMA -------------------------------------------------------------------
 	// Disable DMA
-	DMA1_Channel3->CCR = 0;
+	PD_TX_DMA_CHANNEL->CCR = 0;
 	// Clear ISR
 	DMA1->IFCR = 0xF00;
 	// Priority very high, MSIZE=8, PSIZE=8, Memory increment mode, Memory->Peripheral
-	DMA1_Channel3->CCR = (3<<DMA_CCR_PL_Pos) | (0<<DMA_CCR_MSIZE_Pos) | (0<<DMA_CCR_PSIZE_Pos) | DMA_CCR_MINC | DMA_CCR_DIR;
-	DMA1_Channel3->CNDTR = DIV_ROUND_UP(raw_ptr, 8);
-	DMA1_Channel3->CPAR = (uint32_t)(&(SPI1->DR));
-	DMA1_Channel3->CMAR = (uint32_t)raw_samples_buf;
+	PD_TX_DMA_CHANNEL->CCR = (3<<DMA_CCR_PL_Pos) | (0<<DMA_CCR_MSIZE_Pos) | (0<<DMA_CCR_PSIZE_Pos) | DMA_CCR_MINC | DMA_CCR_DIR;
+	PD_TX_DMA_CHANNEL->CNDTR = DIV_ROUND_UP(raw_ptr, 8);
+	PD_TX_DMA_CHANNEL->CPAR = (uint32_t)(&(SPI1->DR));
+	PD_TX_DMA_CHANNEL->CMAR = (uint32_t)raw_samples_buf;
 
 	// Flush data in write buffer so that DMA can get the lastest data
 	asm volatile("dmb;");
 	DMA1->IFCR = 0xF00;
 
 	// Enable DMA
-	DMA1_Channel3->CCR |= DMA_CCR_EN;
+	PD_TX_DMA_CHANNEL->CCR |= DMA_CCR_EN;
 
 	SPI1->CR1 &= ~SPI_CR1_SSI;
 
@@ -695,7 +699,6 @@ char pd_tx(void) {
 	return 0;
 }
 
-static int b_toggle;
 void pd_write_preamble(void) {
 	uint32_t *msg = raw_samples_buf;
 
