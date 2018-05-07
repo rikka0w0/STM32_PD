@@ -3,13 +3,12 @@
 
 #include <stdint.h>
 
-// GPIO usages
+// CC GPIO mapping
 #define PD_CC1_PIN GPIO_PIN_2
 #define PD_CC2_PIN GPIO_PIN_4
 #define PD_CC_GPIO GPIOA
-#define PD_COMP_PIN GPIO_PIN_1	// PB1 as TIM3_CH4 during rx
-#define PD_COMP_GPIO GPIOB
 
+// CC status
 #define PD_CC_MASK	0x03
 #define PD_CC_NC	0x00
 #define PD_CC_1		0x01

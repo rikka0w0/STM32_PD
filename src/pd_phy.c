@@ -1,18 +1,48 @@
 #include "platform.h"
 #include "pd_phy.h"
 
+// Configuration Start ---------------------------------------------------
+// Rx GPIO Configuration ----------------------------------
+#define PD_COMP_PIN1 GPIO_PIN_0 // PB0 as TIM3_CH3 during Rx
+#define PD_COMP_PIN2 GPIO_PIN_1	// PB1 as TIM3_CH4 during Rx
+#define PD_COMP_GPIO GPIOB
+// Rx EXTI Configuration ----------------------------------
+#define PD_COMP_EXTI EXTI0_1_IRQn
+// Rx Timer Configuration ---------------------------------
+// RM0091 page 449, IC4 = TI3FP4 input
+#define PD_RX_CCMR_CC1() (TIM3->CCMR2 = 0x200)
+// RM0091 page 449, IC4 = TI4FP4 input
+#define PD_RX_CCMR_CC2() (TIM3->CCMR2 = 0x100)
+// RM0091 page 450, CC4E=1, Capture enabled
+// CC4NP=1, CC4P=1, IC4 falling/rising
+#define PD_RX_CCER_EN() (TIM3->CCER = 0xB000)
+#define PD_RX_CCER_DIS() (TIM3->CCER &= ~0xF000)
+// RM0091 page 441, Enable DMA request for IC4
+#define PD_RX_DIER_SET() (TIM3->DIER = 0x1000)
+// Rx DMA Configuration -----------------------------------
+#define PD_RX_DMA_SRCADDR (&(TIM3->CCR4))
 #define PD_RX_DMA_CHANNEL DMA1_Channel3		// TIM3_CH4
+// Configuration End -----------------------------------------------------
+
+// Configurations that should not be changed -----------------------------
+#define PD_RX_TIM_INCLK 48000000
+#define PD_COMP_MASK (PD_COMP_PIN1 | PD_COMP_PIN2)
+#define PD_COMP_PIN(cc) (cc==PD_CC_1 ? PD_COMP_PIN1 : PD_COMP_PIN2)
+#define PD_RX_TIMEOUT() (TIM3->SR & 4)
 #define PD_TX_DMA_CHANNEL DMA1_Channel3		// SPI1_Tx
+// -----------------------------------------------------------------------
 
+// Utility macros --------------------------------------------------------
 #define DIV_ROUND_UP(x, y) (((x) + ((y) - 1)) / (y))
-#define TX_CLOCK_DIV 48000000 / (2*300000) // Tx Clock = 2 x bit rate of BMC
+#define TX_CLOCK_DIV (PD_RX_TIM_INCLK / (2*300000)) // Tx Clock = 2 x bit rate of BMC
 
+// Global variables ------------------------------------------------------
 uint32_t raw_samples_buf[PD_MAX_RAW_SIZE/4];
 uint8_t* raw_samples;
 uint16_t raw_ptr;	// Current Pos in Rx and number of raw bits in Tx
 uint8_t* rx_ptr;
 static int b_toggle;	// Records bit sequences during Tx
-static uint8_t pd_selected_cc;
+static volatile uint8_t pd_selected_cc;
 
 static uint64_t rx_edge_ts[PD_RX_TRANSITION_COUNT];
 static int rx_edge_ts_idx;
@@ -103,16 +133,12 @@ static const char dec4b5b[] = {
 /* Error    */ TABLE_5b4b_ERR /* 11111 */,
 };
 
+/**
+ * Set the active CC pin, as well as configure the comparator input pin and Tx pin
+ */
 void pd_select_cc(uint8_t cc) {
 	GPIO_InitTypeDef GPIO_InitStruct;
-	if (cc == PD_CC_1) {	// CC1 is CC, pull-up CC2, PB4 is Tx
-		PD_CC_GPIO->ODR |= PD_CC2_PIN;
-		GPIO_InitStruct.Pin = PD_CC2_PIN;
-		GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-		GPIO_InitStruct.Pull = GPIO_NOPULL;
-		HAL_GPIO_Init(PD_CC_GPIO, &GPIO_InitStruct);
-		PD_CC_GPIO->ODR |= PD_CC2_PIN;
-
+	if (cc == PD_CC_1) {	// CC1 is CC, PB4 is Tx
 	    GPIO_InitStruct.Pin = GPIO_PIN_4;
 	    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
 	    GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -121,14 +147,21 @@ void pd_select_cc(uint8_t cc) {
 	    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
 	    pd_selected_cc = PD_CC_1;
-	} else if (cc == PD_CC_2) {	// CC2 is CC, pull-up CC1, PA6 is Tx
-		PD_CC_GPIO->ODR |= PD_CC1_PIN;
-		GPIO_InitStruct.Pin = PD_CC1_PIN ;
-		GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-		GPIO_InitStruct.Pull = GPIO_NOPULL;
-		HAL_GPIO_Init(PD_CC_GPIO, &GPIO_InitStruct);
-		PD_CC_GPIO->ODR |= PD_CC1_PIN;
 
+		// Comparator GPIO1
+		GPIO_InitStruct.Pin = PD_COMP_PIN1;
+		GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+		GPIO_InitStruct.Pull = GPIO_PULLUP;
+		HAL_GPIO_Init(PD_COMP_GPIO, &GPIO_InitStruct);
+
+		PD_RX_CCER_DIS();
+		PD_RX_CCMR_CC1();
+		PD_RX_CCER_EN();
+		// RM0091 page 444, Enable update CC4 generation
+		TIM3->EGR = 0x11;
+		// RM0091 page 442, Clear flags
+		TIM3->SR = 0;
+	} else if (cc == PD_CC_2) {	// CC2 is CC, PA6 is Tx
 	    GPIO_InitStruct.Pin = GPIO_PIN_6;
 	    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
 	    GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -144,8 +177,21 @@ void pd_select_cc(uint8_t cc) {
 	    // GPIOA->PUPDR &= ~GPIO_PUPDR_PUPDR6;	// PA6 -> No pull-up/ pull-down
 
 	    pd_selected_cc = PD_CC_2;
+
+		// Comparator GPIO2
+		GPIO_InitStruct.Pin = PD_COMP_PIN2;
+		GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+		GPIO_InitStruct.Pull = GPIO_PULLUP;
+		HAL_GPIO_Init(PD_COMP_GPIO, &GPIO_InitStruct);
+
+		PD_RX_CCER_DIS();
+		PD_RX_CCMR_CC2();
+		PD_RX_CCER_EN();
+		// RM0091 page 444, Enable update CC4 generation
+		TIM3->EGR = 0x11;
+		// RM0091 page 442, Clear flags
+		TIM3->SR = 0;
 	} else {
-		PD_CC_GPIO->ODR &= ~(PD_CC1_PIN | PD_CC2_PIN);
 		GPIO_InitStruct.Pin = PD_CC1_PIN | PD_CC2_PIN;
 		GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
 		GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -155,17 +201,23 @@ void pd_select_cc(uint8_t cc) {
 		GPIO_InitStruct.Pin = GPIO_PIN_6;
 		GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
 		GPIO_InitStruct.Pull = GPIO_NOPULL;
-		GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
 		HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
 		GPIO_InitStruct.Pin = GPIO_PIN_4;
 		HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
 		pd_selected_cc = PD_CC_NC;
+
+		// Disable Comparator IT
+		GPIO_InitStruct.Pin = PD_COMP_MASK;
+		HAL_GPIO_Init(PD_COMP_GPIO, &GPIO_InitStruct);
 	}
 }
 
-uint32_t pd_set_tx_pin(uint8_t cc) {
+/**
+ * Get ready for Tx, change active cc to open drain and return the bit mask (to be used for pulling down the GPIO)
+ */
+uint32_t pd_tx_prepare_cc(uint8_t cc) {
 	static uint8_t last_cc;
 
 	if (cc == PD_CC_1) {	// PD_CC_1=0, PB4=Tx
@@ -220,23 +272,18 @@ void pd_init(void) {
 	__HAL_RCC_GPIOA_CLK_ENABLE();
 	__HAL_RCC_GPIOB_CLK_ENABLE();
 
-	pd_select_cc(0);
+	pd_select_cc(PD_CC_NC);
 	GPIO_InitStruct.Pin = GPIO_PIN_11;
 	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
 	GPIO_InitStruct.Pull = GPIO_NOPULL;
 	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 	GPIOB->ODR |= GPIO_PIN_11;
 
-	// Comparator GPIO
-	GPIO_InitStruct.Pin = PD_COMP_PIN;
-	GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
-	GPIO_InitStruct.Pull = GPIO_PULLUP;
-	HAL_GPIO_Init(PD_COMP_GPIO, &GPIO_InitStruct);
 	pd_rx_disable_monitoring();
 
 	/* EXTI interrupt init*/
-	HAL_NVIC_SetPriority(EXTI0_1_IRQn, 0, 0);
-	HAL_NVIC_EnableIRQ(EXTI0_1_IRQn);
+	HAL_NVIC_SetPriority(PD_COMP_EXTI, 0, 0);
+	HAL_NVIC_EnableIRQ(PD_COMP_EXTI);
 
 	// TIM3
     __HAL_RCC_TIM3_CLK_ENABLE();
@@ -245,18 +292,8 @@ void pd_init(void) {
 	TIM3->CR2 = 0x0000;
 	TIM3->DIER = 0x0000;
 	TIM3->ARR = 0xFFFF;	// Auto-reload value, 16-bit free running counter
-	TIM3->PSC = (48000000 / 12000000) - 1; // Prescaler = fAPB1_Timer / 12MHz - 1;
+	TIM3->PSC = (PD_RX_TIM_INCLK / 12000000) - 1; // Prescaler = fAPB1_Timer / 12MHz - 1;
 	TIM3->CCR2 = (12000000 / 1000) * USB_PD_RX_TMOUT_US / 1000;	// Channel 2 - Timeout = 21600 Ticks
-
-	// RM0091 page 449, IC4 = TI4FP4 input
-	TIM3->CCMR2 = 0x100;
-	// RM0091 page 450, CC4E=1, Capture enabled
-	// CC4NP=1, CC4P=1, IC4 falling/rising
-	TIM3->CCER = 0xB000;
-	// RM0091 page 444, Enable update CC4 generation
-	TIM3->EGR = 0x11;
-	// RM0091 page 442, Clear flags
-	TIM3->SR = 0;
 
 	// DMA
 	__HAL_RCC_DMA1_CLK_ENABLE();
@@ -289,21 +326,21 @@ void pd_init(void) {
     GPIO_InitStruct.Alternate = GPIO_AF0_SPI1;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    pd_set_tx_pin(0);
+    pd_tx_prepare_cc(0);
 }
 
 void pd_rx_enable_monitoring(void) {
 	/* clear comparator external interrupt */
-	EXTI->PR = PD_COMP_PIN;		// Pending register
+	EXTI->PR = PD_COMP_MASK;		// Pending register
 	/* enable comparator external interrupt */
-	EXTI->IMR |= PD_COMP_PIN;
+	EXTI->IMR |= PD_COMP_MASK;
 }
 
 void pd_rx_disable_monitoring(void) {
 	/* disable comparator external interrupt */
-	EXTI->IMR &= ~ PD_COMP_PIN;
+	EXTI->IMR &= ~ PD_COMP_MASK;
 	/* clear comparator external interrupt */
-	EXTI->PR = PD_COMP_PIN;
+	EXTI->PR = PD_COMP_MASK;
 }
 
 uint32_t pd_rx_started(void) {
@@ -319,30 +356,32 @@ void pd_rx_complete() {
 	PD_RX_DMA_CHANNEL->CCR = 0;
 }
 
-void pd_rx_start() {GPIOB->ODR &= ~GPIO_PIN_11;
+void pd_rx_start() {
 	raw_samples = (uint8_t*) raw_samples_buf;
 
 	// Comparator GPIO -> Alternate function mode (for TIM3_CH4)
 	GPIO_InitTypeDef GPIO_InitStruct;
-    GPIO_InitStruct.Pin = PD_COMP_PIN;
+    GPIO_InitStruct.Pin = PD_COMP_PIN(pd_selected_cc);
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     GPIO_InitStruct.Alternate = GPIO_AF1_TIM3;
     HAL_GPIO_Init(PD_COMP_GPIO, &GPIO_InitStruct);
 
+    GPIOB->ODR &= ~GPIO_PIN_11;
+
 	// Disable DMA
 	PD_RX_DMA_CHANNEL->CCR = 0;
 	// Clear ISR
 	DMA1->IFCR = 0xF00;
 
-	// RM0091 page 441, Enable DMA request for IC4
-	TIM3->DIER = 0x1000;
+	// Enable Rx timer's DMA request
+	PD_RX_DIER_SET();
 
 	// Priority very high, MSIZE=8, PSIZE=16, Memory increment mode
 	PD_RX_DMA_CHANNEL->CCR = (3<<DMA_CCR_PL_Pos) | (0<<DMA_CCR_MSIZE_Pos) | (1<<DMA_CCR_PSIZE_Pos) | DMA_CCR_MINC;
 	PD_RX_DMA_CHANNEL->CNDTR = PD_MAX_RAW_SIZE;
-	PD_RX_DMA_CHANNEL->CPAR = (uint32_t)(&(TIM3->CCR4));
+	PD_RX_DMA_CHANNEL->CPAR = (uint32_t)PD_RX_DMA_SRCADDR;
 	PD_RX_DMA_CHANNEL->CMAR = (uint32_t)raw_samples;
 
 	/* Flush data in write buffer so that DMA can get the lastest data */
@@ -359,9 +398,10 @@ void pd_rx_start() {GPIOB->ODR &= ~GPIO_PIN_11;
 
 void pd_rx_handler(void) {
 	int next_idx;
+	uint32_t pd_comp_pin = PD_COMP_PIN(pd_selected_cc);
 
 	// See RM0091 page 214 & EXTI_PR
-	if(__HAL_GPIO_EXTI_GET_IT(PD_COMP_PIN) != RESET) {
+	if(__HAL_GPIO_EXTI_GET_IT(pd_comp_pin) != RESET) {
 		rx_edge_ts[rx_edge_ts_idx] = timestamp_get();
 		next_idx = (rx_edge_ts_idx == PD_RX_TRANSITION_COUNT - 1) ?
 					0 : rx_edge_ts_idx + 1;
@@ -387,7 +427,7 @@ void pd_rx_handler(void) {
 			return; // pd_rx_event(i);
 		} else {
 			/* do not trigger RX start, just clear int */
-			__HAL_GPIO_EXTI_CLEAR_IT(PD_COMP_PIN);
+			__HAL_GPIO_EXTI_CLEAR_IT(pd_comp_pin);
 		}
 		rx_edge_ts_idx = next_idx;
 	}
@@ -401,8 +441,8 @@ uint8_t pd_find_preamble(void) {
 	while (raw_ptr < PD_BIT_LEN) {
 		if ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)) {
 			while ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)
-					&& !(TIM3->SR & 4));
-			if (TIM3->SR & 4) {
+					&& !PD_RX_TIMEOUT());
+			if (PD_RX_TIMEOUT()) {
 				return PD_RX_ERR_TIMEOUT;
 			}
 		}
@@ -437,19 +477,18 @@ uint8_t pd_find_preamble(void) {
 		4. So the decoding rule becomes, read "all" as a 32-bit binary number,
 			a 0 corresponds to actual data bit 0 and two adjacent 1 in "all" correspond to actual data bit 1.
 
-			0x36db6db6  should be SYNC-1
-			0011 0110 1101 1011 0110 1101 1011 0110鈥�
-			001  01 0 1 01  01  01 0 10 1  01  01 0
+			0xC7E3C78D got SOP
+			1100 0111 1110 0011 1100 0111 1000 1101
+			1 00 01 1  1 0 001  1 00 01 1  000 1 01
 
-			0010101010101010101010
-			| [Preamble---------->
+			10001 11000 11000 11000 101
+			Sync2 Sync1 Sync1 Sync1 |[Preamble---------->
 			|
-			Return value, end of preamble
+			Return value, end of preamble & SOP
 
 
-
-			0xF33F3F3F  got HARD-RESET
-			鈥�1111 0011 0011 1111 0011 1111 0011 1111鈥�
+			0xF33F3F3F got HARD-RESET
+			1111 0011 0011 1111 0011 1111 0011 1111
 			1 1  001  001  1 1  001  1 1  001  1 1
 
 			11001 00111 00111 00111
@@ -457,8 +496,8 @@ uint8_t pd_find_preamble(void) {
 
 
 
-			0x3c7fe0ff  got CABLE-RESET
-			鈥�0011 1100 0111 1111 1110 0000 1111 1111鈥�
+			0x3c7fe0ff got CABLE-RESET
+			0011 1100 0111 1111 1110 0000 1111 1111
 			001  1 00 01 1  1 1  1 0 0000 1 1  1 1
 			00110 00111 11000 00111 1
 			Sync3 RST-1 Sync1 RST-1 | Last bit of preamble
@@ -482,8 +521,8 @@ char pd_rx_decode_byte(void) {
 	for (uint8_t bit=0; bit<5; bit++) {
 		if ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)) {
 			while ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)
-					&& !(TIM3->SR & 4));
-			if (TIM3->SR & 4) {
+					&& !PD_RX_TIMEOUT());
+			if (PD_RX_TIMEOUT()) {
 				return PD_RX_ERR_TIMEOUT;
 			}
 		}
@@ -498,8 +537,8 @@ char pd_rx_decode_byte(void) {
 			raw |= 1 << bit;
 			if ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)) {
 				while ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)
-						&& !(TIM3->SR & 4));
-				if (TIM3->SR & 4) {
+						&& !PD_RX_TIMEOUT());
+				if (PD_RX_TIMEOUT()) {
 					return PD_RX_ERR_TIMEOUT;
 				}
 			}
@@ -515,8 +554,8 @@ char pd_rx_decode_byte(void) {
 	for (uint8_t bit=5; bit<10; bit++) {
 		if ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)) {
 			while ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)
-					&& !(TIM3->SR & 4));
-			if (TIM3->SR & 4) {
+					&& !PD_RX_TIMEOUT());
+			if (PD_RX_TIMEOUT()) {
 				return PD_RX_ERR_TIMEOUT;
 			}
 		}
@@ -531,8 +570,8 @@ char pd_rx_decode_byte(void) {
 			raw |= 1 << (bit-5);
 			if ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)) {
 				while ((PD_MAX_RAW_SIZE - PD_RX_DMA_CHANNEL->CNDTR < raw_ptr + 1)
-						&& !(TIM3->SR & 4));
-				if (TIM3->SR & 4) {
+						&& !PD_RX_TIMEOUT());
+				if (PD_RX_TIMEOUT()) {
 					return PD_RX_ERR_TIMEOUT;
 				}
 			}
@@ -630,6 +669,9 @@ int pd_rx_process(void) {
 	return 0;
 }
 
+/**
+ * Transmit an encoded PD message to the active cc line. Return negative if something goes wrong.
+ */
 char pd_tx(void) {
 	pd_rx_disable_monitoring();
 
@@ -637,7 +679,7 @@ char pd_tx(void) {
 		return -1;
 
 	// Config CC GPIO for Tx
-	uint32_t cc = pd_set_tx_pin(pd_selected_cc);	// Get the GPIO mask
+	uint32_t cc = pd_tx_prepare_cc(pd_selected_cc);	// Get the GPIO mask
 
 	// Initialize SPI ----------------------------------------------------------------
 	SPI1->CR2 = SPI_CR2_TXDMAEN | (7<<SPI_CR2_DS_Pos); // Enable DMA, 8 data bit
@@ -691,7 +733,7 @@ char pd_tx(void) {
 	TIM14->CR1 &= ~TIM_CR1_CEN;
 
 	// Restore CC
-	pd_set_tx_pin(0);
+	pd_tx_prepare_cc(PD_CC_NC);
 
 	__HAL_RCC_SPI1_FORCE_RESET();
 	__HAL_RCC_SPI1_RELEASE_RESET();
@@ -752,6 +794,12 @@ void pd_write_last_edge(void) {
 	raw_ptr += 3;
 }
 
+/**
+ * Encode message bytes into BMC and 4b5b form
+ * header: the 16-bit header
+ * cnt: the number of 32-bit payloads (same as the Number of Data Objects field in the Message Header)
+ * data: a pointer to the payload buffer, 0 if the message is a control message
+ */
 void pd_prepare_message(uint16_t header, uint8_t cnt, const uint32_t *data) {
 	pd_write_preamble();
 	pd_write_sym(BMC(PD_SYNC1));
