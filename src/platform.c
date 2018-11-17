@@ -5,7 +5,7 @@
 
 extern __IO uint32_t uwTick;
 
-#define SYSTICK_PER_US 48
+// #define SYSTICK_PER_US 48
 
 // Return timestamp in microsecond (us)
 uint64_t timestamp_get(void) {
@@ -14,7 +14,9 @@ uint64_t timestamp_get(void) {
 		ms = uwTick;
 		systick = SysTick->LOAD - SysTick->VAL;
 	} while (ms != uwTick);
-	return ms * 1000 + systick / SYSTICK_PER_US;
+	//return ms * 1000 + systick / SYSTICK_PER_US;
+	systick = ((systick >> 4) * 0x5556) >> 16;	// divide by 48, assume systick<65535
+	return ((uint64_t)ms * 1000) + systick;
 }
 
 size_t uart_strlen(const char * str) {
@@ -90,7 +92,6 @@ static void UART1_Init(void) {
 	GPIO_InitTypeDef GPIO_InitStruct;
 
 	__HAL_RCC_USART1_CLK_ENABLE();
-	__HAL_RCC_GPIOA_CLK_ENABLE();
 
 	/**
 	 USART1 GPIO Configuration
@@ -161,6 +162,11 @@ static void SystemClock_Config(void) {
 
 	// SysTick_IRQn interrupt configuration
 	HAL_NVIC_SetPriority(SysTick_IRQn, 0, 0);
+
+	// Enable GPIO clocks
+	__HAL_RCC_GPIOA_CLK_ENABLE();
+	__HAL_RCC_GPIOB_CLK_ENABLE();
+	__HAL_RCC_GPIOF_CLK_ENABLE();
 }
 
 static void ADC_Init(void) {

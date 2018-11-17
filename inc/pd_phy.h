@@ -46,11 +46,10 @@
 #define PD_HEADER_ID(header)   (((header) >> 9) & 7)
 #define PD_HEADER_REV(header)  (((header) >> 6) & 3)
 
-enum pd_rx_errors {
-	PD_RX_SOPPP = 3,
-	PD_RX_SOPP = 2,
-	PD_RX_SOP = 1,
-	PD_RX_SUCCESS = 0,
+enum pd_rx_sop_types {	// negative value indicates error
+	PD_RX_SOPPP = 2,
+	PD_RX_SOPP = 1,
+	PD_RX_SOP = 0,
 	PD_RX_ERR_INVAL = -1,           /* Invalid packet */
 	PD_RX_ERR_HARD_RESET = -2,      /* Got a Hard-Reset packet */
 	PD_RX_ERR_CRC = -3,             /* CRC mismatch */
@@ -76,9 +75,12 @@ void pd_select_cc(uint8_t cc);
 void pd_rx_disable_monitoring(void);
 void pd_rx_enable_monitoring(void);
 uint32_t pd_rx_started(void);
-int pd_rx_process(void);
 
 char pd_tx(void);
 void pd_prepare_message(uint16_t header, uint8_t cnt, const uint32_t *data);
 
+// CC Rp/Rd & Vconn control
+void pd_cc_rprp_init(void);
+uint8_t pd_cc_read_status(uint8_t cc, uint8_t resistor, uint8_t rp);
+void pd_cc_set(uint8_t role_ctrl_regval);
 #endif // __PD_PHY_H

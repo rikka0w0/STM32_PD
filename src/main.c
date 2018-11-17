@@ -1,19 +1,19 @@
 #include <error_handler.h>
 #include "pd_phy.h"
 #include "platform.h"
+#include "tcpci.h"
 
-extern void pd_sink_run(void);
-extern void pd_sink_enable(void);
-extern void pd_test_tx(void);
 int main(void) {
 	hw_init();
 
+	pd_cc_rprp_init();
 	pd_init();
-	pd_sink_enable();
-	//pd_test_tx();
-	uart_puts("STM32 PD\n");
-	while (1)  {
-		pd_sink_run();
 
+	uint8_t cmd[2] = {TCPC_REG_ROLE_CTRL, TCPC_REG_ROLE_CTRL_SET(0,0,TYPEC_CC_RD,TYPEC_CC_RD)};
+	tcpc_i2c_process(0, sizeof(cmd), cmd, 0);
+
+	//uart_puts("STM32 PD\n");
+	while (1)  {
+		tcpc_run();
 	}
 }

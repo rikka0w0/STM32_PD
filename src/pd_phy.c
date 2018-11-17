@@ -37,12 +37,13 @@
 #define TX_CLOCK_DIV (PD_RX_TIM_INCLK / (2*300000)) // Tx Clock = 2 x bit rate of BMC
 
 // Global variables ------------------------------------------------------
-uint32_t raw_samples_buf[PD_MAX_RAW_SIZE/4];
-uint8_t* raw_samples;
-uint16_t raw_ptr;	// Current Pos in Rx and number of raw bits in Tx
-uint8_t* rx_ptr;
+static uint32_t raw_samples_buf[PD_MAX_RAW_SIZE/4];
+static uint8_t* raw_samples;
+static uint16_t raw_ptr;	// Current Pos in Rx and number of raw bits in Tx
+static uint8_t* rx_ptr;
 static int b_toggle;	// Records bit sequences during Tx
 static volatile uint8_t pd_selected_cc;
+static volatile int8_t rx_sop_type;
 
 static uint64_t rx_edge_ts[PD_RX_TRANSITION_COUNT];
 static int rx_edge_ts_idx;
@@ -217,7 +218,7 @@ void pd_select_cc(uint8_t cc) {
 /**
  * Get ready for Tx, change active cc to open drain and return the bit mask (to be used for pulling down the GPIO)
  */
-uint32_t pd_tx_prepare_cc(uint8_t cc) {
+static uint32_t pd_tx_prepare_cc(uint8_t cc) {
 	static uint8_t last_cc;
 
 	if (cc == PD_CC_1) {	// PD_CC_1=0, PB4=Tx
@@ -268,10 +269,6 @@ uint32_t pd_tx_prepare_cc(uint8_t cc) {
 void pd_init(void) {
 	GPIO_InitTypeDef GPIO_InitStruct;
 
-	/* GPIO Ports Clock Enable */
-	__HAL_RCC_GPIOA_CLK_ENABLE();
-	__HAL_RCC_GPIOB_CLK_ENABLE();
-
 	pd_select_cc(PD_CC_NC);
 	GPIO_InitStruct.Pin = GPIO_PIN_11;
 	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -282,7 +279,7 @@ void pd_init(void) {
 	pd_rx_disable_monitoring();
 
 	/* EXTI interrupt init*/
-	HAL_NVIC_SetPriority(PD_COMP_EXTI, 0, 0);
+	HAL_NVIC_SetPriority(PD_COMP_EXTI, 1, 0);
 	HAL_NVIC_EnableIRQ(PD_COMP_EXTI);
 
 	// TIM3
@@ -313,7 +310,7 @@ void pd_init(void) {
 	TIM14->PSC = 0;
 	TIM14->CCR1 = TIM14->ARR / 2; // 50% duty cycle
 
-	TIM14->CCMR1 = 0x68;	// 110: PWM mode 1, up counting. 0x08: enable reload
+	TIM14->CCMR1 = 0x68;	// 110: PWM mode 1, up counting. 0x08: enable preload
 	TIM14->CCER = 1; 		// CH1 output enable
 	TIM14->EGR = 1;			// UG=1, Reinitialize the counter and generates an update of the registers
 
@@ -368,8 +365,6 @@ void pd_rx_start() {
     GPIO_InitStruct.Alternate = GPIO_AF1_TIM3;
     HAL_GPIO_Init(PD_COMP_GPIO, &GPIO_InitStruct);
 
-    GPIOB->ODR &= ~GPIO_PIN_11;
-
 	// Disable DMA
 	PD_RX_DMA_CHANNEL->CCR = 0;
 	// Clear ISR
@@ -396,44 +391,7 @@ void pd_rx_start() {
 	TIM3->CR1 |= 1; // Enable Timer
 }
 
-void pd_rx_handler(void) {
-	int next_idx;
-	uint32_t pd_comp_pin = PD_COMP_PIN(pd_selected_cc);
-
-	// See RM0091 page 214 & EXTI_PR
-	if(__HAL_GPIO_EXTI_GET_IT(pd_comp_pin) != RESET) {
-		rx_edge_ts[rx_edge_ts_idx] = timestamp_get();
-		next_idx = (rx_edge_ts_idx == PD_RX_TRANSITION_COUNT - 1) ?
-					0 : rx_edge_ts_idx + 1;
-
-		/*
-		 * If we have seen enough edges in a certain amount of
-		 * time, then trigger RX start.
-		 */
-		if ((rx_edge_ts[rx_edge_ts_idx] -
-		     rx_edge_ts[next_idx])
-		     < PD_RX_TRANSITION_WINDOW) {
-
-			/*
-			 * ignore the comparator IRQ until we are done
-			 * with current message
-			 */
-			pd_rx_disable_monitoring();
-
-			/* start sampling */
-			pd_rx_start();
-
-			/* trigger the analysis in the task */
-			return; // pd_rx_event(i);
-		} else {
-			/* do not trigger RX start, just clear int */
-			__HAL_GPIO_EXTI_CLEAR_IT(pd_comp_pin);
-		}
-		rx_edge_ts_idx = next_idx;
-	}
-}
-
-uint8_t pd_find_preamble(void) {
+static inline int8_t pd_find_preamble(void) {
 	raw_ptr = 2; 	// DMA1_CH3, TIM3_CH4
 
 	uint32_t all = 0;
@@ -513,7 +471,7 @@ uint8_t pd_find_preamble(void) {
 	return PD_RX_ERR_INVAL;
 }
 
-char pd_rx_decode_byte(void) {
+static inline char pd_rx_decode_byte(void) {
 	uint8_t nibble;
 	uint8_t raw = 0;
 	uint8_t cnt;
@@ -589,9 +547,9 @@ char pd_rx_decode_byte(void) {
 	return 0;
 }
 uint8_t ent=0;uint32_t msgreq = 0x230320C8;
-int pd_rx_process(void) {
+static inline int8_t pd_rx_process(void) {
 	ent++;
-	uint16_t sop = pd_find_preamble();
+	int8_t sop = pd_find_preamble();
 	if (sop != PD_RX_SOP)
 		return sop;
 
@@ -639,9 +597,11 @@ int pd_rx_process(void) {
 		return PD_RX_ERR_INVAL;
 	crcr |= (*rx_ptr)<<24;
 
-	pd_rx_complete();
+	pd_rx_complete();	// Ignore EOP
 	if (crcr != crcc)
 		return PD_RX_ERR_CRC;
+
+	//return sop;
 
 	if (ent==2)
 		while(1);
@@ -656,6 +616,7 @@ int pd_rx_process(void) {
 		/* another packet recvd before we could send goodCRC */
 		return PD_RX_ERR_INVAL;
 
+    GPIOB->ODR &= ~GPIO_PIN_11;
 	HAL_Delay(2);
 //	header = PD_HEADER(2, 0,	// Sink
 //			0, 0, 0, PD_REV, 0);	// UFP
@@ -667,6 +628,43 @@ int pd_rx_process(void) {
 
 	pd_rx_enable_monitoring();
 	return 0;
+}
+
+void pd_rx_isr_handler(void) {
+	int next_idx;
+	uint32_t pd_comp_pin = PD_COMP_PIN(pd_selected_cc);
+
+	// See RM0091 page 214 & EXTI_PR
+	if(__HAL_GPIO_EXTI_GET_IT(pd_comp_pin) != RESET) {
+		rx_edge_ts[rx_edge_ts_idx] = timestamp_get();
+		next_idx = (rx_edge_ts_idx == PD_RX_TRANSITION_COUNT - 1) ?
+					0 : rx_edge_ts_idx + 1;
+
+		/*
+		 * If we have seen enough edges in a certain amount of
+		 * time, then trigger RX start.
+		 */
+		if ((rx_edge_ts[rx_edge_ts_idx] -
+		     rx_edge_ts[next_idx])
+		     < PD_RX_TRANSITION_WINDOW) {
+
+			/*
+			 * ignore the comparator IRQ until we are done
+			 * with current message
+			 */
+			pd_rx_disable_monitoring();
+
+			/* start sampling */
+			pd_rx_start();
+
+			/* trigger the analysis in the task */
+			rx_sop_type = pd_rx_process();
+		} else {
+			/* do not trigger RX start, just clear int */
+			__HAL_GPIO_EXTI_CLEAR_IT(pd_comp_pin);
+		}
+		rx_edge_ts_idx = next_idx;
+	}
 }
 
 /**
@@ -839,25 +837,4 @@ void pd_prepare_message(uint16_t header, uint8_t cnt, const uint32_t *data) {
 	pd_write_sym(BMC(PD_EOP));
 
 	pd_write_last_edge();
-}
-
-void pd_test_tx(void) {
-	GPIO_InitTypeDef GPIO_InitStruct;
-	GPIO_InitStruct.Pin = GPIO_PIN_15;
-	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-	pd_select_cc(PD_CC_1);
-
-	while (GPIOB->IDR & GPIO_PIN_15);
-	GPIOB->ODR &= ~GPIO_PIN_11;
-
-	uint16_t header = PD_HEADER(1, 0,	// Sink
-			0, 3, 0, 0, 0);	// UFP
-	pd_prepare_message(header, 0, 0);
-
-	pd_tx();
-
-	while(1);
 }

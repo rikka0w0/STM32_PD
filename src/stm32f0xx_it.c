@@ -41,7 +41,7 @@ void SysTick_Handler(void)
 #endif
 }
 
-extern void pd_rx_handler(void);
+extern void pd_rx_isr_handler(void);
 void EXTI0_1_IRQHandler(void) {
-	pd_rx_handler();
+	pd_rx_isr_handler();
 }

@@ -1,5 +1,5 @@
-#ifndef __TIMESTAMP_H
-#define __TIMESTAMP_H
+#ifndef __PLATFORM_H
+#define __PLATFORM_H
 
 #include <stdint.h>
 #include "stm32f0xx_hal.h"
@@ -28,4 +28,4 @@ uint16_t adc_read_temperature(void);
 
 void hw_init(void);
 
-#endif // __TIMESTAMP_H
+#endif // __PLATFORM_H

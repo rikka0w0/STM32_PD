@@ -133,7 +133,7 @@ void pd_sink_run(void) {
 		break;
 	case PD_PORTSTATE_CONNECTED:
 		if (pd_rx_started()) {
-			pd_rx_process();
+			//pd_rx_process();
 		} else {
 			if ((pd_port_status & PD_CC_MASK) == PD_CC_1) {
 				if (pd_detect_cc(PD_CC_1) == PD_ICAP_NC) {
