@@ -2,8 +2,16 @@
 #include "pd_phy.h"
 #include "tcpci.h"
 
+#define TCPC_TIMER_TOGGLE_SNK 60000
+#define TCPC_TIMER_TOGGLE_SRC 60000
+
 // internal_flags
-#define TCPC_FLAG_RDRP_CHANGED (1<<0)
+#define TCPC_FLAG_LOOKING4CON (1<<0)
+#define TCPC_FLAG_DRP_TOGGLE_AS_SNK (1<<1)
+#define TCPC_FLAG_DRP_TOGGLE_AS_SRC (1<<2)
+#define TCPC_FLAG_CON_RESULT (1<<3)
+#define TCPC_FLAG_DEBOUNCING (1<<4)
+#define TCPC_FLAG_DEBOUNCE_FAILED (1<<5)
 
 #define RX_BUFFER_SIZE 1
 
@@ -41,12 +49,15 @@ static struct pd_port_controller {
 	const uint32_t *tx_data;
 
 	/* Internal Flags */
+	uint8_t state;
 	uint32_t internal_flags;
+	uint64_t drp_last_toggle_timestamp;
+	uint64_t cc_debouncing_timestamp;
 	uint64_t cc_last_sampled_timestamp;
 } pd;
-
+uint32_t c=0;
 static void alert(uint16_t mask)
-{
+{c++;
 	/* Always update the Alert status register */
 	pd.alert |= mask;
 	/*
@@ -102,6 +113,53 @@ void tcpc_init(void)
 	alert(TCPC_REG_ALERT_POWER_STATUS);
 }
 
+static inline void tcpc_look4forconnection(void)
+{
+	uint8_t cc1 = TCPC_REG_ROLE_CTRL_CC1(pd.cc_role_ctrl);
+	uint8_t cc2 = TCPC_REG_ROLE_CTRL_CC2(pd.cc_role_ctrl);
+
+	if (pd.cc_role_ctrl & TCPC_REG_ROLE_CTRL_DRP_MASK) {
+		// DRP auto-toggle is enabled
+		if (cc1 != cc2)	// If cc1 and cc2 are not both Rp/Rd at the same time, then return
+			return;
+
+		if (cc2 == TYPEC_CC_RP) {
+			pd.internal_flags |= TCPC_FLAG_LOOKING4CON | TCPC_FLAG_DRP_TOGGLE_AS_SRC;
+			pd.drp_last_toggle_timestamp = timestamp_get();
+		} else if (cc2 == TYPEC_CC_RD) {
+			pd.internal_flags |= TCPC_FLAG_LOOKING4CON | TCPC_FLAG_DRP_TOGGLE_AS_SNK;
+			pd.drp_last_toggle_timestamp = timestamp_get();
+		}
+	}
+}
+
+static inline void tcpc_role_ctrl_change(uint8_t newval)
+{
+	pd.internal_flags &=~ (TCPC_FLAG_LOOKING4CON | TCPC_FLAG_DRP_TOGGLE_AS_SNK | TCPC_FLAG_DRP_TOGGLE_AS_SRC);
+
+	// Update DRP bit
+	pd.cc_role_ctrl &= ~ TCPC_REG_ROLE_CTRL_DRP_MASK;
+	pd.cc_role_ctrl |= newval & TCPC_REG_ROLE_CTRL_DRP_MASK;
+
+	if (TCPC_REG_ROLE_CTRL_CCXRP(pd.cc_role_ctrl) == TCPC_REG_ROLE_CTRL_CCXRP(newval))
+		return;	// Nothing changed, do not change Rp/Rd
+
+	// Rp/Rd changed
+
+	pd.cc_role_ctrl = newval;	// DRP bit has been updated already
+	pd_cc_set(TCPC_REG_ROLE_CTRL_CCXRP(pd.cc_role_ctrl));
+
+	/*
+	 * Before CC pull can be changed and the task can read the new
+	 * status, we should set the CC status to open, in case TCPM
+	 * asks before it is known for sure.
+	 */
+	pd.cc_status[0] = TYPEC_CC_VOLT_OPEN;
+	pd.cc_status[1] = TYPEC_CC_VOLT_OPEN;
+
+	pd.cc_last_sampled_timestamp = timestamp_get();	// Postponed the next sampling of CC line, debouncing
+}
+
 static void tcpc_i2c_write(uint32_t len, uint8_t *payload)
 {
 	uint16_t alert;
@@ -125,54 +183,21 @@ static void tcpc_i2c_write(uint32_t len, uint8_t *payload)
 		break;
 
 
-
+	case TCPC_REG_TCPC_CTRL:
+		//tcpc_set_polarity(TCPC_REG_TCPC_CTRL_POLARITY(payload[1]));
+		break;
 	case TCPC_REG_ROLE_CTRL:
-		/*
-		 * Assume B3:2 and B1:0 are the same:
-		 * Both open for NC
-		 * Both Rd for source
-		 * Both Rp for sink
-		 *
-		 * Cable requires to present a single Ra, this is done through connecting a physical 1k Resistor
-		 */
-
-		// Update DRP bit
-		pd.cc_role_ctrl &=~ TCPC_REG_ROLE_CTRL_DRP_MASK;
-		pd.cc_role_ctrl |= payload[1] & TCPC_REG_ROLE_CTRL_DRP_MASK;
-
-		/* If CC pull resistor not changing, then nothing to do */
-		if (TCPC_REG_ROLE_CTRL_CCXRP(pd.cc_role_ctrl) == TCPC_REG_ROLE_CTRL_CCXRP(payload[1]))
-			return;
-
-		/* Change CC pull resistor */
-		pd.cc_role_ctrl = payload[1];	// DRP bit has been updated
-
-		pd_cc_set(TCPC_REG_ROLE_CTRL_CCXRP(pd.cc_role_ctrl));
-
-		// Set Rp and Rd
-		pd_cc_set(payload[1]);
-
-		/*
-		 * Before CC pull can be changed and the task can read the new
-		 * status, we should set the CC status to open, in case TCPM
-		 * asks before it is known for sure.
-		 */
-		pd.cc_status[0] = TYPEC_CC_VOLT_OPEN;
-		pd.cc_status[1] = TYPEC_CC_VOLT_OPEN;
-
-		pd.cc_last_sampled_timestamp = timestamp_get();	// Postponed the next sampling of CC line, debouncing
-		// Fire CC line change event ?
-		/* Wake the PD phy task with special CC event mask */
-		/* TODO: use top case if no TCPM on same CPU */
-		//tcpc_run(port, PD_EVENT_CC);
-		//task_set_event(PD_PORT_TO_TASK_ID(port), PD_EVENT_CC, 0);
+		tcpc_role_ctrl_change(payload[1]);
 		break;
 	case TCPC_REG_POWER_CTRL:
 		//tcpc_set_vconn(TCPC_REG_POWER_CTRL_VCONN(payload[1]));
 		break;
-	case TCPC_REG_TCPC_CTRL:
-		//tcpc_set_polarity(TCPC_REG_TCPC_CTRL_POLARITY(payload[1]));
+
+	case TCPC_REG_COMMAND:
+		if (payload[1] == TCPC_REG_COMMAND_LOOK4CONNECTION) tcpc_look4forconnection();
 		break;
+
+
 	case TCPC_REG_MSG_HDR_INFO:
 		//tcpc_set_msg_header(TCPC_REG_MSG_HDR_INFO_PROLE(payload[1]),
 		//		    TCPC_REG_MSG_HDR_INFO_DROLE(payload[1]));
@@ -290,20 +315,94 @@ void tcpc_i2c_process(uint8_t read, uint32_t len, uint8_t *payload)
 
 static inline void tcpc_detect_cc_status(void)
 {
+	uint64_t cur_timestamp = timestamp_get();
+	static uint8_t last_cc1, last_cc2;
+
 	uint8_t cc1 = pd_cc_read_status(1, TCPC_REG_ROLE_CTRL_CC1(pd.cc_role_ctrl), TCPC_REG_ROLE_CTRL_RP(pd.cc_role_ctrl));
 	uint8_t cc2 = pd_cc_read_status(2, TCPC_REG_ROLE_CTRL_CC2(pd.cc_role_ctrl), TCPC_REG_ROLE_CTRL_RP(pd.cc_role_ctrl));
 
-	if (pd.cc_status[0] != cc1 || pd.cc_status[1] != cc2) {
-		pd.cc_status[0] = cc1;
-		pd.cc_status[1] = cc2;
-		alert(TCPC_REG_ALERT_CC_STATUS);
+	if (pd.internal_flags & TCPC_FLAG_DEBOUNCING) {
+		if (last_cc1 != cc1 || last_cc2 != cc2) {
+			// CC lines are still oscillating
+			last_cc1 = cc1;
+			last_cc2 = cc2;
+			pd.cc_debouncing_timestamp = timestamp_get();
+		} else {
+			// CC lines reach new steady state
+			if (timestamp_get() > pd.cc_debouncing_timestamp + 10000) {
+				pd.internal_flags &=~ TCPC_FLAG_DEBOUNCING;
+
+				// Now cc1 and cc2 contains the valid state
+				if (pd.cc_status[0] != cc1 || pd.cc_status[1] != cc2) {
+					pd.cc_status[0] = last_cc1;
+					pd.cc_status[1] = last_cc2;
+					alert(TCPC_REG_ALERT_CC_STATUS);
+				}
+			}
+		}
+	} else {
+		if (pd.cc_status[0] != cc1 || pd.cc_status[1] != cc2) {
+			// CC lines are different from previous valid state
+			last_cc1 = cc1;
+			last_cc2 = cc2;
+			pd.internal_flags |= TCPC_FLAG_DEBOUNCING;
+			pd.cc_debouncing_timestamp = cur_timestamp;
+		}
 	}
+
+//	if (pd.internal_flags & TCPC_FLAG_LOOKING4CON) {
+//		if (pd.internal_flags & TCPC_FLAG_DRP_TOGGLE_AS_SNK) {
+//			if (cc1 != TYPEC_CC_VOLT_OPEN || cc2 != TYPEC_CC_VOLT_OPEN) {
+//				// Found potential connection as sink
+//
+//				// CC.Looking4Connection=0, CC.ConnectResult=1
+//				pd.internal_flags &=~ (TCPC_FLAG_LOOKING4CON | TCPC_FLAG_DRP_TOGGLE_AS_SNK | TCPC_FLAG_CON_RESULT);
+//				pd.internal_flags |= TCPC_FLAG_CON_RESULT;
+//				alert(TCPC_REG_ALERT_CC_STATUS);
+//			}
+//		} else if (pd.internal_flags & TCPC_FLAG_DRP_TOGGLE_AS_SRC) {
+//			if (cc1 == TYPEC_CC_RD || cc2 == TYPEC_CC_RD || (cc1 == TYPEC_CC_RA && cc2 == TYPEC_CC_RA)) {
+//				// Found potential connection as source
+//
+//				// CC.Looking4Connection=0, CC.ConnectResult=0
+//				pd.internal_flags &=~ (TCPC_FLAG_LOOKING4CON | TCPC_FLAG_DRP_TOGGLE_AS_SRC | TCPC_FLAG_CON_RESULT);
+//				alert(TCPC_REG_ALERT_CC_STATUS);
+//			}
+//		}
+//	}
 }
 
 // Run TCPC state machine once
 void tcpc_run(void)
 {
 	uint64_t cur_timestamp = timestamp_get();
+
+	if (pd.internal_flags & TCPC_FLAG_LOOKING4CON) {
+		if (pd.internal_flags & TCPC_FLAG_DRP_TOGGLE_AS_SNK) {
+			if (cur_timestamp > pd.drp_last_toggle_timestamp + TCPC_TIMER_TOGGLE_SNK) {
+				// Timer expired, Switch to SRC (Rp)
+				pd.internal_flags &=~ TCPC_FLAG_DRP_TOGGLE_AS_SNK;
+				pd.internal_flags |= TCPC_FLAG_DRP_TOGGLE_AS_SRC;
+
+				pd_cc_set(TCPC_REG_ROLE_CTRL_SET(0, TCPC_REG_ROLE_CTRL_RP(pd.cc_role_ctrl), TYPEC_CC_RP, TYPEC_CC_RP));
+				pd.cc_status[0] = TYPEC_CC_VOLT_OPEN;
+				pd.cc_status[1] = TYPEC_CC_VOLT_OPEN;
+				pd.cc_last_sampled_timestamp = cur_timestamp;	// Postponed the next sampling of CC line, debouncing
+			}
+		} else if (pd.internal_flags & TCPC_FLAG_DRP_TOGGLE_AS_SRC) {
+			if (cur_timestamp > pd.drp_last_toggle_timestamp + TCPC_TIMER_TOGGLE_SRC) {
+				// Timer expired, Switch to SRC (Rp)
+				pd.internal_flags &=~ TCPC_FLAG_DRP_TOGGLE_AS_SRC;
+				pd.internal_flags |= TCPC_FLAG_DRP_TOGGLE_AS_SNK;
+
+				pd_cc_set(TCPC_REG_ROLE_CTRL_SET(0, 0, TYPEC_CC_RD, TYPEC_CC_RD));
+				pd.cc_status[0] = TYPEC_CC_VOLT_OPEN;
+				pd.cc_status[1] = TYPEC_CC_VOLT_OPEN;
+				pd.cc_last_sampled_timestamp = cur_timestamp;	// Postponed the next sampling of CC line, debouncing
+			}
+		}
+	}
+
 
 	// Check CC lines every 1mS
 	if (cur_timestamp > pd.cc_last_sampled_timestamp + 1000)
@@ -313,4 +412,6 @@ void tcpc_run(void)
 		// Check CC lines
 		tcpc_detect_cc_status();
 	}
+
+
 }
