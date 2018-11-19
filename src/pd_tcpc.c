@@ -49,15 +49,14 @@ static struct pd_port_controller {
 	const uint32_t *tx_data;
 
 	/* Internal Flags */
-	uint8_t state;
 	uint32_t internal_flags;
 	uint64_t drp_last_toggle_timestamp;
 	uint64_t cc_debouncing_timestamp;
 	uint64_t cc_last_sampled_timestamp;
 } pd;
-uint32_t c=0;
+
 static void alert(uint16_t mask)
-{c++;
+{
 	/* Always update the Alert status register */
 	pd.alert |= mask;
 	/*
@@ -313,9 +312,8 @@ void tcpc_i2c_process(uint8_t read, uint32_t len, uint8_t *payload)
 	}
 }
 
-static inline void tcpc_detect_cc_status(void)
+static inline void tcpc_detect_cc_status(uint64_t cur_timestamp)
 {
-	uint64_t cur_timestamp = timestamp_get();
 	static uint8_t last_cc1, last_cc2;
 
 	uint8_t cc1 = pd_cc_read_status(1, TCPC_REG_ROLE_CTRL_CC1(pd.cc_role_ctrl), TCPC_REG_ROLE_CTRL_RP(pd.cc_role_ctrl));
@@ -326,17 +324,49 @@ static inline void tcpc_detect_cc_status(void)
 			// CC lines are still oscillating
 			last_cc1 = cc1;
 			last_cc2 = cc2;
-			pd.cc_debouncing_timestamp = timestamp_get();
+			pd.cc_debouncing_timestamp = cur_timestamp;
 		} else {
-			// CC lines reach new steady state
-			if (timestamp_get() > pd.cc_debouncing_timestamp + 10000) {
+			// CC lines are not changing
+			if (pd.internal_flags & TCPC_FLAG_LOOKING4CON) {
 				pd.internal_flags &=~ TCPC_FLAG_DEBOUNCING;
+				pd.cc_status[0] = last_cc1;
+				pd.cc_status[1] = last_cc2;
 
-				// Now cc1 and cc2 contains the valid state
-				if (pd.cc_status[0] != cc1 || pd.cc_status[1] != cc2) {
-					pd.cc_status[0] = last_cc1;
-					pd.cc_status[1] = last_cc2;
-					alert(TCPC_REG_ALERT_CC_STATUS);
+				if (pd.internal_flags & TCPC_FLAG_DRP_TOGGLE_AS_SNK) {
+					if (cc1 != TYPEC_CC_VOLT_OPEN
+							|| cc2 != TYPEC_CC_VOLT_OPEN) {
+						// Found potential connection as sink
+
+						// CC.Looking4Connection=0, CC.ConnectResult=1
+						pd.internal_flags &= ~(TCPC_FLAG_LOOKING4CON
+								| TCPC_FLAG_DRP_TOGGLE_AS_SNK
+								| TCPC_FLAG_CON_RESULT);
+						pd.internal_flags |= TCPC_FLAG_CON_RESULT;
+						alert(TCPC_REG_ALERT_CC_STATUS);
+					}
+				} else if (pd.internal_flags & TCPC_FLAG_DRP_TOGGLE_AS_SRC) {
+					if (cc1 == TYPEC_CC_RD || cc2 == TYPEC_CC_RD
+							|| (cc1 == TYPEC_CC_RA && cc2 == TYPEC_CC_RA)) {
+						// Found potential connection as source
+
+						// CC.Looking4Connection=0, CC.ConnectResult=0
+						pd.internal_flags &= ~(TCPC_FLAG_LOOKING4CON
+								| TCPC_FLAG_DRP_TOGGLE_AS_SRC
+								| TCPC_FLAG_CON_RESULT);
+						alert(TCPC_REG_ALERT_CC_STATUS);
+					}
+				} // There should not be other cases!
+			} else {
+				if (cur_timestamp > pd.cc_debouncing_timestamp + 10000) {
+					pd.internal_flags &= ~ TCPC_FLAG_DEBOUNCING;
+
+					// Now cc1 and cc2 contains the valid state
+					if (pd.cc_status[0] != cc1 || pd.cc_status[1] != cc2) {
+						// Found next state
+						pd.cc_status[0] = last_cc1;
+						pd.cc_status[1] = last_cc2;
+						alert(TCPC_REG_ALERT_CC_STATUS);
+					}
 				}
 			}
 		}
@@ -347,29 +377,8 @@ static inline void tcpc_detect_cc_status(void)
 			last_cc2 = cc2;
 			pd.internal_flags |= TCPC_FLAG_DEBOUNCING;
 			pd.cc_debouncing_timestamp = cur_timestamp;
-		}
+		} // if (pd.cc_status[0] != cc1 || pd.cc_status[1] != cc2) {
 	}
-
-//	if (pd.internal_flags & TCPC_FLAG_LOOKING4CON) {
-//		if (pd.internal_flags & TCPC_FLAG_DRP_TOGGLE_AS_SNK) {
-//			if (cc1 != TYPEC_CC_VOLT_OPEN || cc2 != TYPEC_CC_VOLT_OPEN) {
-//				// Found potential connection as sink
-//
-//				// CC.Looking4Connection=0, CC.ConnectResult=1
-//				pd.internal_flags &=~ (TCPC_FLAG_LOOKING4CON | TCPC_FLAG_DRP_TOGGLE_AS_SNK | TCPC_FLAG_CON_RESULT);
-//				pd.internal_flags |= TCPC_FLAG_CON_RESULT;
-//				alert(TCPC_REG_ALERT_CC_STATUS);
-//			}
-//		} else if (pd.internal_flags & TCPC_FLAG_DRP_TOGGLE_AS_SRC) {
-//			if (cc1 == TYPEC_CC_RD || cc2 == TYPEC_CC_RD || (cc1 == TYPEC_CC_RA && cc2 == TYPEC_CC_RA)) {
-//				// Found potential connection as source
-//
-//				// CC.Looking4Connection=0, CC.ConnectResult=0
-//				pd.internal_flags &=~ (TCPC_FLAG_LOOKING4CON | TCPC_FLAG_DRP_TOGGLE_AS_SRC | TCPC_FLAG_CON_RESULT);
-//				alert(TCPC_REG_ALERT_CC_STATUS);
-//			}
-//		}
-//	}
 }
 
 // Run TCPC state machine once
@@ -410,7 +419,7 @@ void tcpc_run(void)
 		pd.cc_last_sampled_timestamp = cur_timestamp;
 
 		// Check CC lines
-		tcpc_detect_cc_status();
+		tcpc_detect_cc_status(cur_timestamp);
 	}
 
 
