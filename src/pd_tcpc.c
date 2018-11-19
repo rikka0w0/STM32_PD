@@ -42,14 +42,67 @@ static struct pd_port_controller {
 
 	/* Internal Flags */
 	uint32_t internal_flags;
-	uint64_t cc_last_changed_timestamp;
+	uint64_t cc_last_sampled_timestamp;
 } pd;
 
-void tcpc_init(void) {
-	// Initialize PD hardware
-	pd_init();
+static void alert(uint16_t mask)
+{
+	/* Always update the Alert status register */
+	pd.alert |= mask;
+	/*
+	 * Only send interrupt to TCPM if corresponding
+	 * bit in the alert_enable register is set.
+	 */
+	//if (pd.alert_mask & mask)
+		//tcpc_alert(port);
 }
-static void tcpc_i2c_write(int reg, int len, uint8_t *payload)
+
+static void tcpc_alert_status_clear(uint16_t mask)
+{
+	/*
+	 * If the RX status alert is attempting to be cleared, then increment
+	 * rx buffer tail pointer. if the RX buffer is not empty, then keep
+	 * the RX status alert active.
+	 */
+//	if (mask & TCPC_REG_ALERT_RX_STATUS) {
+//		if (!rx_buf_is_empty(port)) {
+//			rx_buf_increment(port, &pd[port].rx_buf_tail);
+//			if (!rx_buf_is_empty(port))
+//				/* buffer is not empty, keep alert active */
+//				mask &= ~TCPC_REG_ALERT_RX_STATUS;
+//		}
+//	}
+
+	/* clear only the bits specified by the TCPM */
+	pd.alert &= ~mask;
+
+	/* Set Alert# inactive if all alert bits clear */
+	//if (!pd[port].alert)
+		//tcpc_alert_clear(port);
+}
+
+void tcpc_init(void)
+{
+	pd.power_status |= TCPC_REG_POWER_STATUS_UNINIT | TCPC_REG_POWER_STATUS_VBUS_DET;
+
+	// Initialize CC pull-up/pull-down and Vconn controller
+	pd_cc_rprp_init();
+
+	// Initialize PD BMC transceiver
+	pd_init();
+
+	pd.cc_role_ctrl = TCPC_REG_ROLE_CTRL_SET(0, TYPEC_RP_USB, TYPEC_CC_RD, TYPEC_CC_RD);
+
+	/* set default alert and power mask register values */
+	pd.alert_mask = TCPC_REG_ALERT_MASK_ALL;
+	pd.power_status_mask = TCPC_REG_POWER_STATUS_MASK_ALL;
+
+	// Init done!
+	pd.power_status &=~ TCPC_REG_POWER_STATUS_UNINIT;
+	alert(TCPC_REG_ALERT_POWER_STATUS);
+}
+
+static void tcpc_i2c_write(uint32_t len, uint8_t *payload)
 {
 	uint16_t alert;
 
@@ -57,7 +110,22 @@ static void tcpc_i2c_write(int reg, int len, uint8_t *payload)
 	if (pd.power_status & TCPC_REG_POWER_STATUS_UNINIT)
 		return;
 
-	switch (reg) {
+	switch (payload[0]) {
+
+	case TCPC_REG_ALERT:
+		alert = payload[1];
+		alert |= (payload[2] << 8);
+		/* clear alert bits specified by the TCPM */
+		tcpc_alert_status_clear(alert);
+		break;
+	case TCPC_REG_ALERT_MASK:
+		alert = payload[1];
+		alert |= (payload[2] << 8);
+		//tcpc_alert_mask_set(alert);
+		break;
+
+
+
 	case TCPC_REG_ROLE_CTRL:
 		/*
 		 * Assume B3:2 and B1:0 are the same:
@@ -92,8 +160,7 @@ static void tcpc_i2c_write(int reg, int len, uint8_t *payload)
 		pd.cc_status[0] = TYPEC_CC_VOLT_OPEN;
 		pd.cc_status[1] = TYPEC_CC_VOLT_OPEN;
 
-		pd.internal_flags |= TCPC_FLAG_RDRP_CHANGED;
-		pd.cc_last_changed_timestamp = timestamp_get();
+		pd.cc_last_sampled_timestamp = timestamp_get();	// Postponed the next sampling of CC line, debouncing
 		// Fire CC line change event ?
 		/* Wake the PD phy task with special CC event mask */
 		/* TODO: use top case if no TCPM on same CPU */
@@ -110,17 +177,7 @@ static void tcpc_i2c_write(int reg, int len, uint8_t *payload)
 		//tcpc_set_msg_header(TCPC_REG_MSG_HDR_INFO_PROLE(payload[1]),
 		//		    TCPC_REG_MSG_HDR_INFO_DROLE(payload[1]));
 		break;
-	case TCPC_REG_ALERT:
-		alert = payload[1];
-		alert |= (payload[2] << 8);
-		/* clear alert bits specified by the TCPM */
-		//tcpc_alert_status_clear(alert);
-		break;
-	case TCPC_REG_ALERT_MASK:
-		alert = payload[1];
-		alert |= (payload[2] << 8);
-		//tcpc_alert_mask_set(alert);
-		break;
+
 	case TCPC_REG_RX_DETECT:
 		//tcpc_set_rx_enable(payload[1] & TCPC_REG_RX_DETECT_SOP_HRST_MASK);
 		break;
@@ -140,12 +197,24 @@ static void tcpc_i2c_write(int reg, int len, uint8_t *payload)
 	}
 }
 
-static int tcpc_i2c_read(int reg, uint8_t *payload)
+static int tcpc_i2c_read(uint8_t *payload)
 {
 	int cc1, cc2;
 	int alert;
 
-	switch (reg) {
+	switch (payload[0]) {
+
+	case TCPC_REG_ALERT:
+		payload[0] = pd.alert & 0xff;
+		payload[1] = (pd.alert >> 8) & 0xff;
+		return 2;
+	case TCPC_REG_ALERT_MASK:
+		payload[0] = pd.alert_mask & 0xff;
+		payload[1] = (pd.alert_mask >> 8) & 0xff;
+		return 2;
+	case TCPC_REG_POWER_STATUS_MASK:
+		payload[0] = pd.power_status_mask;
+		return 1;
 
 	case TCPC_REG_CC_STATUS:
 		payload[0] = TCPC_REG_CC_STATUS_SET(
@@ -164,15 +233,7 @@ static int tcpc_i2c_read(int reg, uint8_t *payload)
 	case TCPC_REG_RX_DETECT:
 		payload[0] = pd.rx_enabled ? TCPC_REG_RX_DETECT_SOP_HRST_MASK : 0;
 		return 1;
-	case TCPC_REG_ALERT:
-		//tcpc_alert_status(&alert);
-		payload[0] = alert & 0xff;
-		payload[1] = (alert >> 8) & 0xff;
-		return 2;
-	case TCPC_REG_ALERT_MASK:
-		payload[0] = pd.alert_mask & 0xff;
-		payload[1] = (pd.alert_mask >> 8) & 0xff;
-		return 2;
+
 	case TCPC_REG_RX_BYTE_CNT:
 		payload[0] = 3 + 4 *
 			PD_HEADER_CNT(pd.rx_head[pd.rx_buf_tail]);
@@ -188,9 +249,7 @@ static int tcpc_i2c_read(int reg, uint8_t *payload)
 	case TCPC_REG_POWER_STATUS:
 		payload[0] = pd.power_status;
 		return 1;
-	case TCPC_REG_POWER_STATUS_MASK:
-		payload[0] = pd.power_status_mask;
-		return 1;
+
 	case TCPC_REG_TX_HDR:
 		payload[0] = pd.tx_head & 0xff;
 		payload[1] = (pd.tx_head >> 8) & 0xff;
@@ -204,11 +263,8 @@ static int tcpc_i2c_read(int reg, uint8_t *payload)
 	}
 }
 
-void tcpc_i2c_process(int read, int len, uint8_t *payload,
-		      void (*send_response)(int))
+void tcpc_i2c_process(uint8_t read, uint32_t len, uint8_t *payload)
 {
-	int reg;
-
 	/* length must always be at least 1 */
 	if (len == 0) {
 		/*
@@ -223,15 +279,12 @@ void tcpc_i2c_process(int read, int len, uint8_t *payload,
 	if (!read && len < 2)
 		return;
 
-	/* register is always first byte */
-	reg = payload[0];
-
 	/* perform read or write */
 	if (read) {
-		len = tcpc_i2c_read(reg, payload);
+		len = tcpc_i2c_read(payload);
 		//(*send_response)(len);
 	} else {
-		tcpc_i2c_write(reg, len, payload);
+		tcpc_i2c_write(len, payload);
 	}
 }
 
@@ -243,7 +296,7 @@ static inline void tcpc_detect_cc_status(void)
 	if (pd.cc_status[0] != cc1 || pd.cc_status[1] != cc2) {
 		pd.cc_status[0] = cc1;
 		pd.cc_status[1] = cc2;
-		//alert(port, TCPC_REG_ALERT_CC_STATUS);
+		alert(TCPC_REG_ALERT_CC_STATUS);
 	}
 }
 
@@ -252,11 +305,11 @@ void tcpc_run(void)
 {
 	uint64_t cur_timestamp = timestamp_get();
 
-	/* CC pull changed, wait 1ms for CC voltage to stabilize */
-	if ((pd.internal_flags & TCPC_FLAG_RDRP_CHANGED) & (cur_timestamp - pd.cc_last_changed_timestamp > 1000))
-		pd.internal_flags &=~ TCPC_FLAG_RDRP_CHANGED;
+	// Check CC lines every 1mS
+	if (cur_timestamp > pd.cc_last_sampled_timestamp + 1000)
+	{
+		pd.cc_last_sampled_timestamp = cur_timestamp;
 
-	if (!(pd.internal_flags & TCPC_FLAG_RDRP_CHANGED)) {	// Not in debouncing
 		// Check CC lines
 		tcpc_detect_cc_status();
 	}

@@ -8,9 +8,9 @@
 
 #include "pd.h"
 
+void tcpc_init(void);
 void tcpc_run(void);
-void tcpc_i2c_process(int read, int len, uint8_t *payload,
-		      void (*send_response)(int));
+void tcpc_i2c_process(uint8_t read, uint32_t len, uint8_t *payload);
 
 enum tcpc_cc_voltage_status {
 	TYPEC_CC_VOLT_OPEN = 0,		// SRC.Open, SNK.Open
