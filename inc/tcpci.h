@@ -12,6 +12,9 @@ void tcpc_init(void);
 void tcpc_run(void);
 void tcpc_i2c_process(uint8_t read, uint32_t len, uint8_t *payload);
 
+// The following can be called by TCPM if TCPM is on the same CPU and same task
+void tcpc_look4forconnection(void);
+
 enum tcpc_cc_voltage_status {
 	TYPEC_CC_VOLT_OPEN = 0,		// SRC.Open, SNK.Open
 	TYPEC_CC_VOLT_RA = 1,		// SRC.Ra
@@ -108,7 +111,7 @@ enum tcpm_transmit_type {
 #define TCPC_REG_POWER_CTRL_VCONN(reg)    ((reg) & 0x1)
 
 #define TCPC_REG_CC_STATUS         0x1d
-#define TCPC_REG_CC_STATUS_LOOK4CONNECTION(reg) ((reg & 0x20) >> 5)
+#define TCPC_REG_CC_STATUS_LOOK4CONNECTION_MASK 0x20
 #define TCPC_REG_CC_STATUS_SET(term, cc1, cc2) \
 		((term) << 4 | ((cc2) & 0x3) << 2 | ((cc1) & 0x3))
 #define TCPC_REG_CC_STATUS_TERM(reg) (((reg) & 0x10) >> 4)

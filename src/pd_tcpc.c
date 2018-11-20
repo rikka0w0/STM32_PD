@@ -22,11 +22,11 @@ static struct pd_port_controller {
 	uint8_t data_role;
 
 	/* Port polarity : 0 => CC1 is CC line, 1 => CC2 is CC line */
-	uint8_t polarity;
-	/* Our CC pull resistor setting */
+	uint8_t cc_tcpc_ctrl;	// TCPC_Control bit0
+	uint8_t cc_power_ctrl;
 	uint8_t cc_role_ctrl;
 	/* CC status */
-	uint8_t cc_status[2];
+	uint8_t cc_status[2];	// tcpc_cc_voltage_status
 
 	/* TCPC alert status */
 	uint16_t alert;
@@ -112,21 +112,24 @@ void tcpc_init(void)
 	alert(TCPC_REG_ALERT_POWER_STATUS);
 }
 
-static inline void tcpc_look4forconnection(void)
+void tcpc_look4forconnection(void)
 {
 	uint8_t cc1 = TCPC_REG_ROLE_CTRL_CC1(pd.cc_role_ctrl);
 	uint8_t cc2 = TCPC_REG_ROLE_CTRL_CC2(pd.cc_role_ctrl);
 
+	if (cc1 != cc2)	// If cc1 and cc2 are not both Rp/Rd at the same time, then return
+		return;
+
+	if (cc2 == TYPEC_CC_RP || cc2 == TYPEC_CC_RD)
+		pd.internal_flags |= TCPC_FLAG_LOOKING4CON;
+
 	if (pd.cc_role_ctrl & TCPC_REG_ROLE_CTRL_DRP_MASK) {
 		// DRP auto-toggle is enabled
-		if (cc1 != cc2)	// If cc1 and cc2 are not both Rp/Rd at the same time, then return
-			return;
-
 		if (cc2 == TYPEC_CC_RP) {
-			pd.internal_flags |= TCPC_FLAG_LOOKING4CON | TCPC_FLAG_DRP_TOGGLE_AS_SRC;
+			pd.internal_flags |= TCPC_FLAG_DRP_TOGGLE_AS_SRC;
 			pd.drp_last_toggle_timestamp = timestamp_get();
 		} else if (cc2 == TYPEC_CC_RD) {
-			pd.internal_flags |= TCPC_FLAG_LOOKING4CON | TCPC_FLAG_DRP_TOGGLE_AS_SNK;
+			pd.internal_flags |= TCPC_FLAG_DRP_TOGGLE_AS_SNK;
 			pd.drp_last_toggle_timestamp = timestamp_get();
 		}
 	}
@@ -223,9 +226,6 @@ static void tcpc_i2c_write(uint32_t len, uint8_t *payload)
 
 static int tcpc_i2c_read(uint8_t *payload)
 {
-	int cc1, cc2;
-	int alert;
-
 	switch (payload[0]) {
 
 	case TCPC_REG_ALERT:
@@ -241,15 +241,28 @@ static int tcpc_i2c_read(uint8_t *payload)
 		return 1;
 
 	case TCPC_REG_CC_STATUS:
-		payload[0] = TCPC_REG_CC_STATUS_SET(
-				TCPC_REG_ROLE_CTRL_CC2(pd.cc_role_ctrl) == TYPEC_CC_RD,
-				pd.cc_status[0], pd.cc_status[1]);
+		if (pd.internal_flags & TCPC_FLAG_LOOKING4CON) {
+			payload[0] = TCPC_REG_CC_STATUS_LOOK4CONNECTION_MASK;
+		} else {
+			payload[0] = TCPC_REG_CC_STATUS_SET(
+					(pd.internal_flags& TCPC_FLAG_CON_RESULT) ? 1 : 0,
+					// If ((POWER_CONTROL.EnableVconn=1 and TCPC_CONTROL.PlugOrientation=1))
+					// or ROLE_CONTROL.CC1=Ra or ROLE_CONTROL.CC1=open
+					(TCPC_REG_POWER_CTRL_VCONN(pd.cc_power_ctrl) && TCPC_REG_TCPC_CTRL_POLARITY(pd.cc_tcpc_ctrl)) || (
+						TCPC_REG_CC_STATUS_CC1(pd.cc_role_ctrl) == TYPEC_CC_RA ||
+						TCPC_REG_CC_STATUS_CC1(pd.cc_role_ctrl) == TYPEC_CC_OPEN) ? 0 : pd.cc_status[0] & 0x3,
+					// If ((POWER_CONTROL.EnableVconn=1 and TCPC_CONTROL.PlugOrientation=0))
+					// or ROLE_CONTROL.CC2=Ra or ROLE_CONTROL.CC2=open
+					(TCPC_REG_POWER_CTRL_VCONN(pd.cc_power_ctrl) && !TCPC_REG_TCPC_CTRL_POLARITY(pd.cc_tcpc_ctrl)) || (
+						TCPC_REG_CC_STATUS_CC2(pd.cc_role_ctrl) == TYPEC_CC_RA ||
+						TCPC_REG_CC_STATUS_CC2(pd.cc_role_ctrl) == TYPEC_CC_OPEN) ? 0 : pd.cc_status[1] & 0x3);
+		}
 		return 1;
 	case TCPC_REG_ROLE_CTRL:
 		payload[0] = pd.cc_role_ctrl;
 		return 1;
 	case TCPC_REG_TCPC_CTRL:
-		payload[0] = TCPC_REG_TCPC_CTRL_SET(pd.polarity);
+		payload[0] = pd.cc_tcpc_ctrl;
 		return 1;
 	case TCPC_REG_MSG_HDR_INFO:
 		payload[0] = TCPC_REG_MSG_HDR_INFO_SET(pd.data_role, pd.power_role);
@@ -332,7 +345,11 @@ static inline void tcpc_detect_cc_status(uint64_t cur_timestamp)
 				pd.cc_status[0] = last_cc1;
 				pd.cc_status[1] = last_cc2;
 
-				if (pd.internal_flags & TCPC_FLAG_DRP_TOGGLE_AS_SNK) {
+				if ((pd.internal_flags & TCPC_FLAG_DRP_TOGGLE_AS_SNK) ||
+							(TCPC_REG_CC_STATUS_CC2(pd.cc_role_ctrl)==TYPEC_CC_RD &&
+							!(pd.internal_flags&TCPC_FLAG_DRP_TOGGLE_AS_SRC) &&
+							!(pd.internal_flags&TCPC_FLAG_DRP_TOGGLE_AS_SNK))
+						) {
 					if (cc1 != TYPEC_CC_VOLT_OPEN
 							|| cc2 != TYPEC_CC_VOLT_OPEN) {
 						// Found potential connection as sink
@@ -344,7 +361,11 @@ static inline void tcpc_detect_cc_status(uint64_t cur_timestamp)
 						pd.internal_flags |= TCPC_FLAG_CON_RESULT;
 						alert(TCPC_REG_ALERT_CC_STATUS);
 					}
-				} else if (pd.internal_flags & TCPC_FLAG_DRP_TOGGLE_AS_SRC) {
+				} else if ((pd.internal_flags & TCPC_FLAG_DRP_TOGGLE_AS_SRC) ||
+							(TCPC_REG_CC_STATUS_CC2(pd.cc_role_ctrl)==TYPEC_CC_RP &&
+							!(pd.internal_flags&TCPC_FLAG_DRP_TOGGLE_AS_SRC) &&
+							!(pd.internal_flags&TCPC_FLAG_DRP_TOGGLE_AS_SNK))
+						) {
 					if (cc1 == TYPEC_CC_RD || cc2 == TYPEC_CC_RD
 							|| (cc1 == TYPEC_CC_RA && cc2 == TYPEC_CC_RA)) {
 						// Found potential connection as source
