@@ -172,21 +172,22 @@ static void tcpc_i2c_write(uint32_t len, uint8_t *payload)
 
 	switch (payload[0]) {
 
-	case TCPC_REG_ALERT:
+	// Alert & Masks
+	case TCPC_REG_ALERT:	// Write bit1 to clear corresponding bit
 		alert = payload[1];
 		alert |= (payload[2] << 8);
 		/* clear alert bits specified by the TCPM */
 		tcpc_alert_status_clear(alert);
 		break;
 	case TCPC_REG_ALERT_MASK:
-		alert = payload[1];
-		alert |= (payload[2] << 8);
-		//tcpc_alert_mask_set(alert);
+		pd.alert_mask = payload[1];
+		pd.alert_mask |= (payload[2] << 8);
 		break;
 
-
+	// Control registers
 	case TCPC_REG_TCPC_CTRL:
-		//tcpc_set_polarity(TCPC_REG_TCPC_CTRL_POLARITY(payload[1]));
+		pd.cc_tcpc_ctrl = payload[1];
+		pd_select_cc(TCPC_REG_TCPC_CTRL_POLARITY(pd.cc_tcpc_ctrl) ? 2 : 1);
 		break;
 	case TCPC_REG_ROLE_CTRL:
 		tcpc_role_ctrl_change(payload[1]);
@@ -195,6 +196,7 @@ static void tcpc_i2c_write(uint32_t len, uint8_t *payload)
 		//tcpc_set_vconn(TCPC_REG_POWER_CTRL_VCONN(payload[1]));
 		break;
 
+	// Command register, write only
 	case TCPC_REG_COMMAND:
 		if (payload[1] == TCPC_REG_COMMAND_LOOK4CONNECTION) tcpc_look4forconnection();
 		break;
@@ -228,6 +230,7 @@ static int tcpc_i2c_read(uint8_t *payload)
 {
 	switch (payload[0]) {
 
+	// Alert & Masks
 	case TCPC_REG_ALERT:
 		payload[0] = pd.alert & 0xff;
 		payload[1] = (pd.alert >> 8) & 0xff;
@@ -240,6 +243,18 @@ static int tcpc_i2c_read(uint8_t *payload)
 		payload[0] = pd.power_status_mask;
 		return 1;
 
+	// Control registers
+	case TCPC_REG_TCPC_CTRL:
+		payload[0] = pd.cc_tcpc_ctrl;
+		return 1;
+	case TCPC_REG_ROLE_CTRL:
+		payload[0] = pd.cc_role_ctrl;
+		return 1;
+	case TCPC_REG_POWER_CTRL:
+		payload[0] = pd.cc_power_ctrl;
+		return 1;
+
+	// Status registers
 	case TCPC_REG_CC_STATUS:
 		if (pd.internal_flags & TCPC_FLAG_LOOKING4CON) {
 			payload[0] = TCPC_REG_CC_STATUS_LOOK4CONNECTION_MASK;
@@ -258,12 +273,11 @@ static int tcpc_i2c_read(uint8_t *payload)
 						TCPC_REG_CC_STATUS_CC2(pd.cc_role_ctrl) == TYPEC_CC_OPEN) ? 0 : pd.cc_status[1] & 0x3);
 		}
 		return 1;
-	case TCPC_REG_ROLE_CTRL:
-		payload[0] = pd.cc_role_ctrl;
+	case TCPC_REG_POWER_STATUS:
+		payload[0] = pd.power_status;
 		return 1;
-	case TCPC_REG_TCPC_CTRL:
-		payload[0] = pd.cc_tcpc_ctrl;
-		return 1;
+
+
 	case TCPC_REG_MSG_HDR_INFO:
 		payload[0] = TCPC_REG_MSG_HDR_INFO_SET(pd.data_role, pd.power_role);
 		return 1;
@@ -283,9 +297,6 @@ static int tcpc_i2c_read(uint8_t *payload)
 		memcpy(payload, pd.rx_payload[pd.rx_buf_tail],
 		       sizeof(pd.rx_payload[pd.rx_buf_tail]));
 		return sizeof(pd.rx_payload[pd.rx_buf_tail]);
-	case TCPC_REG_POWER_STATUS:
-		payload[0] = pd.power_status;
-		return 1;
 
 	case TCPC_REG_TX_HDR:
 		payload[0] = pd.tx_head & 0xff;
