@@ -47,26 +47,29 @@
 #define PD_HEADER_REV(header)  (((header) >> 6) & 3)
 
 enum pd_rx_sop_types {	// negative value indicates error
+	PD_RX_ERR_CABLE_RESET = 6,
+	PD_RX_ERR_HARD_RESET = 5,
+	PD_RX_SOP_DBGPP = 4,
+	PD_RX_SOP_DBGP = 3,
 	PD_RX_SOPPP = 2,
 	PD_RX_SOPP = 1,
 	PD_RX_SOP = 0,
-	PD_RX_ERR_INVAL = -1,           /* Invalid packet */
-	PD_RX_ERR_HARD_RESET = -2,      /* Got a Hard-Reset packet */
-	PD_RX_ERR_CRC = -3,             /* CRC mismatch */
-	PD_RX_ERR_ID = -4,              /* Invalid ID number */
-	PD_RX_ERR_UNSUPPORTED_SOP = -5, /* Unsupported SOP */
-	PD_RX_ERR_CABLE_RESET = -6,      /* Got a Cable-Reset packet */
-	PD_RX_ERR_TIMEOUT = -7
+
+	PD_RX_ERR_TIMEOUT = 0xFF,		// 0xFF, Timeout
+	PD_RX_ERR_INVAL = 0xFE,           /* Invalid packet */
+	PD_RX_ERR_CRC = 0xFD,             /* CRC mismatch */
+	PD_RX_ERR_ID = 0xFC,              /* Invalid ID number */
+	PD_RX_ERR_UNSUPPORTED_SOP = 0xFB, /* Unsupported SOP */
 };
 
 enum pd_rx_special_4b5b {
-	TABLE_5b4b_ERR = 0x90,
-	TABLE_5b4b_SYNC1 = 0xA0,
-	TABLE_5b4b_SYNC2 = 0xB0,
-	TABLE_5b4b_SYNC3 = 0xC0,
-	TABLE_5b4b_RST1 = 0xD0,
-	TABLE_5b4b_RST2 = 0xE0,
-	TABLE_5b4b_EOP = 0xF0
+	TABLE_5b4b_ERR = 16,
+	TABLE_5b4b_SYNC1 = 17,
+	TABLE_5b4b_SYNC2 = 18,
+	TABLE_5b4b_SYNC3 = 19,
+	TABLE_5b4b_RST1 = 20,
+	TABLE_5b4b_RST2 = 21,
+	TABLE_5b4b_EOP = 22
 };
 
 void pd_init(void);

@@ -2,6 +2,7 @@
 #include "pd_phy.h"
 
 // Configuration Start ---------------------------------------------------
+#define PD_PHY_DETECT_ALL_SOP
 // Rx GPIO Configuration ----------------------------------
 #define PD_COMP_PIN1_ID 0 // PB0 as TIM3_CH3 during Rx
 #define PD_COMP_PIN2_ID 1 // PB1 as TIM3_CH4 during Rx
@@ -45,7 +46,7 @@ static uint16_t raw_ptr;	// Current Pos in Rx and number of raw bits in Tx
 static uint8_t* rx_ptr;
 static int b_toggle;	// Records bit sequences during Tx
 static volatile uint8_t pd_selected_cc;
-static volatile int8_t rx_sop_type;
+static volatile uint8_t rx_sop_type;
 
 static uint64_t rx_edge_ts[PD_RX_TRANSITION_COUNT];
 static int rx_edge_ts_idx;
@@ -408,7 +409,7 @@ void pd_rx_start() {
 	TIM3->CR1 |= 1; // Enable Timer
 }
 
-static inline int8_t pd_find_preamble(void) {
+static inline uint8_t pd_find_preamble(void) {
 	raw_ptr = 2; 	// DMA1_CH3, TIM3_CH4
 
 	uint32_t all = 0;
@@ -429,17 +430,24 @@ static inline int8_t pd_find_preamble(void) {
 			cnt = 255 - raw_samples[raw_ptr-1];
 			cnt += 1 + raw_samples[raw_ptr];
 		}
-		raw_ptr++;
 
 		all = (all >> 1) | (cnt <= PD_RX_THRESHOLD ? 1 << 31 : 0);
 
-		if (all == 0xC7E3C78D) {	// SOP, Sync2 Sync1 Sync1 Sync1 101
-			return PD_RX_SOP;
+#ifdef PD_PHY_DETECT_ALL_SOP
+		if (all == 0x36DB6DB6) {
+			raw_ptr--;
+#else
+		if (all == 0xC7E3C78D) {
+			raw_ptr++;
+#endif
+			return PD_RX_SOP;				// Potential SOP* packet
 		} else if (all == 0xF33F3F3F) {
-			return PD_RX_ERR_HARD_RESET; /* got HARD-RESET */
+			return PD_RX_ERR_HARD_RESET;	// Got Hard-Reset
 		} else if (all == 0x3c7fe0ff) {
-			return PD_RX_ERR_CABLE_RESET; /* got CABLE-RESET */
+			return PD_RX_ERR_CABLE_RESET;	// Got Cable-Reset
 		}
+
+		raw_ptr++;
 	}
 
 		/*
@@ -461,6 +469,11 @@ static inline int8_t pd_find_preamble(void) {
 			|
 			Return value, end of preamble & SOP
 
+			0x36DB6DB6 got potential SOP
+			‭0011 0110 1101 1011 0110 1101 1011 0110
+			001  01 0 1 01  01  01 0 1 01  01  01 0
+			|
+			bit0 of Sync-1‬
 
 			0xF33F3F3F got HARD-RESET
 			1111 0011 0011 1111 0011 1111 0011 1111
@@ -488,7 +501,14 @@ static inline int8_t pd_find_preamble(void) {
 	return PD_RX_ERR_INVAL;
 }
 
-static inline char pd_rx_decode_byte(void) {
+/*
+ * Attempt to decode a byte from incoming BMC traffic
+ * Return:
+ * 		0 - decoded a data byte and placed into the buffer(raw_ptr), raw_ptr is automatically increased
+ * 		PD_RX_ERR_TIMEOUT - Timeout, Error
+ * 		Other: K-code e.g. Sync-1 or EOP, or Error(TABLE_5b4b_ERR)
+ */
+static inline uint8_t pd_rx_decode_byte(void) {
 	uint8_t nibble;
 	uint8_t raw = 0;
 	uint8_t cnt;
@@ -522,7 +542,7 @@ static inline char pd_rx_decode_byte(void) {
 	}
 
 	nibble = dec4b5b[raw&0x1F];
-	if (nibble > 15)
+	if (nibble > 15)	// Not a data byte
 		return nibble;
 
 	raw = 0;
@@ -564,11 +584,43 @@ static inline char pd_rx_decode_byte(void) {
 	return 0;
 }
 uint8_t ent=0;uint32_t msgreq = 0x230320C8;
-static inline int8_t pd_rx_process(void) {
+static inline uint8_t pd_rx_process(void) {
 	ent++;
-	int8_t sop = pd_find_preamble();
-	if (sop != PD_RX_SOP)
-		return sop;
+
+	uint8_t sop = pd_find_preamble();
+	if (sop == PD_RX_SOP) {
+#ifdef PD_PHY_DETECT_ALL_SOP
+		uint8_t kcode1 = pd_rx_decode_byte();
+		uint8_t kcode2 = pd_rx_decode_byte();
+		uint8_t kcode3 = pd_rx_decode_byte();
+		uint8_t kcode4 = pd_rx_decode_byte();
+		if (kcode1 == TABLE_5b4b_SYNC1 && kcode2 == TABLE_5b4b_SYNC1
+			&& kcode3 == TABLE_5b4b_SYNC1 && kcode4 == TABLE_5b4b_SYNC2){
+			sop = PD_RX_SOP;
+		} else if (kcode1 == TABLE_5b4b_SYNC1 && kcode2 == TABLE_5b4b_SYNC1
+				&& kcode3 == TABLE_5b4b_SYNC3 && kcode4 == TABLE_5b4b_SYNC3){
+			sop = PD_RX_SOPP;
+		} else if (kcode1 == TABLE_5b4b_SYNC1 && kcode2 == TABLE_5b4b_SYNC3
+				&& kcode3 == TABLE_5b4b_SYNC1 && kcode4 == TABLE_5b4b_SYNC3){
+			sop = PD_RX_SOPPP;
+		} else if (kcode1 == TABLE_5b4b_SYNC1 && kcode2 == TABLE_5b4b_RST2
+				&& kcode3 == TABLE_5b4b_RST2 && kcode4 == TABLE_5b4b_SYNC3){
+			sop = PD_RX_SOP_DBGP;
+		} else if (kcode1 == TABLE_5b4b_SYNC1 && kcode2 == TABLE_5b4b_RST2
+				&& kcode3 == TABLE_5b4b_SYNC3 && kcode4 == TABLE_5b4b_SYNC2){
+			sop = PD_RX_SOP_DBGPP;
+		} else {
+			return PD_RX_ERR_UNSUPPORTED_SOP;
+		}
+#endif
+	} else if (sop ==PD_RX_ERR_HARD_RESET) {
+		return PD_RX_ERR_HARD_RESET;
+	}
+#ifdef PD_PHY_DETECT_ALL_SOP
+	else if (sop == PD_RX_ERR_CABLE_RESET) {
+		return PD_RX_ERR_CABLE_RESET;
+	}
+#endif
 
 	// Decode the header
 	rx_ptr = raw_samples - 1;
@@ -644,7 +696,7 @@ static inline int8_t pd_rx_process(void) {
 		return PD_RX_ERR_INVAL;
 
 	pd_rx_enable_monitoring();
-	return 0;
+	return sop;
 }
 
 void pd_rx_isr_handler(void) {

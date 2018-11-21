@@ -54,7 +54,10 @@ void tcpm_run(void) {
 				buf[0] = 0; // Plug Orientation = 0, monitor the CC1 pin for BMC
 				uart_puts("TCPM_STATE_CONNECTED BMC=CC1\n");
 			}
-			tcpc_i2c_write(TCPC_REG_TCPC_CTRL, 1, buf);
+			tcpc_i2c_write(TCPC_REG_TCPC_CTRL, 1, buf);	// Apply Rp/Rd according to CC_Status.ConnectionResult
+
+			buf[0] = TCPC_REG_RX_DETECT_HRST | TCPC_REG_RX_DETECT_SOP;
+			tcpc_i2c_write(TCPC_REG_RX_DETECT, 1, buf);
 		}
 	} else if (tcpm_state == TCPM_STATE_ASSERTING_DISCONNECTION) {
 		if (timestamp_get() > last_timestamp + 50000) {	// 50ms debouncing
