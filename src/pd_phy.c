@@ -3,8 +3,10 @@
 
 // Configuration Start ---------------------------------------------------
 // Rx GPIO Configuration ----------------------------------
-#define PD_COMP_PIN1 GPIO_PIN_0 // PB0 as TIM3_CH3 during Rx
-#define PD_COMP_PIN2 GPIO_PIN_1	// PB1 as TIM3_CH4 during Rx
+#define PD_COMP_PIN1_ID 0 // PB0 as TIM3_CH3 during Rx
+#define PD_COMP_PIN2_ID 1 // PB1 as TIM3_CH4 during Rx
+#define PD_COMP_PIN1 (((uint16_t)0x0001U) << PD_COMP_PIN1_ID)
+#define PD_COMP_PIN2 (((uint16_t)0x0001U) << PD_COMP_PIN2_ID)
 #define PD_COMP_GPIO GPIOB
 // Rx EXTI Configuration ----------------------------------
 #define PD_COMP_EXTI EXTI0_1_IRQn
@@ -150,10 +152,16 @@ void pd_select_cc(uint8_t cc) {
 	    pd_selected_cc = PD_CC_1;
 
 		// Comparator GPIO1
-		GPIO_InitStruct.Pin = PD_COMP_PIN1;
-		GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
-		GPIO_InitStruct.Pull = GPIO_PULLUP;
-		HAL_GPIO_Init(PD_COMP_GPIO, &GPIO_InitStruct);
+		PD_COMP_GPIO->MODER &=~ (0x03 << (PD_COMP_PIN1_ID<<1));	// Set to input
+		PD_COMP_GPIO->PUPDR &=~ (0x03 << (PD_COMP_PIN1_ID<<1));	// Clear pull-up/pull-down
+		PD_COMP_GPIO->PUPDR |= (0x01 << (PD_COMP_PIN1_ID<<1));	// Set to pull-up
+		// EXTI0 to PB
+		(*(SYSCFG->EXTICR + (PD_COMP_PIN1_ID >> 2))) &=~ ( (0x0FU) << ((PD_COMP_PIN1_ID&0x03U)<<2) );
+		(*(SYSCFG->EXTICR + (PD_COMP_PIN1_ID >> 2))) |= ( (GPIO_GET_INDEX(PD_COMP_GPIO)) << ((PD_COMP_PIN1_ID&0x03U)<<2) );
+		EXTI->EMR &=~ PD_COMP_PIN1;
+		EXTI->IMR &=~ PD_COMP_PIN1;		// Disable the external interrupt
+		EXTI->RTSR &=~ PD_COMP_PIN1;	// Disable rising trigger
+		EXTI->FTSR |= PD_COMP_PIN1;		// Enable falling trigger
 
 		PD_RX_CCER_DIS();
 		PD_RX_CCMR_CC1();
@@ -180,10 +188,16 @@ void pd_select_cc(uint8_t cc) {
 	    pd_selected_cc = PD_CC_2;
 
 		// Comparator GPIO2
-		GPIO_InitStruct.Pin = PD_COMP_PIN2;
-		GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
-		GPIO_InitStruct.Pull = GPIO_PULLUP;
-		HAL_GPIO_Init(PD_COMP_GPIO, &GPIO_InitStruct);
+		PD_COMP_GPIO->MODER &=~ (0x03 << (PD_COMP_PIN2_ID<<1));	// Set to input
+		PD_COMP_GPIO->PUPDR &=~ (0x03 << (PD_COMP_PIN2_ID<<1));	// Clear pull-up/pull-down
+		PD_COMP_GPIO->PUPDR |= (0x01 << (PD_COMP_PIN2_ID<<1));	// Set to pull-up
+		// EXTI0 to PB
+		(*(SYSCFG->EXTICR + (PD_COMP_PIN2_ID >> 2))) &=~ ( (0x0FU) << ((PD_COMP_PIN2_ID&0x03U)<<2) );
+		(*(SYSCFG->EXTICR + (PD_COMP_PIN2_ID >> 2))) |= ( (GPIO_GET_INDEX(PD_COMP_GPIO)) << ((PD_COMP_PIN2_ID&0x03U)<<2) );
+		EXTI->EMR &=~ PD_COMP_PIN2;
+		EXTI->IMR &=~ PD_COMP_PIN2;		// Disable the external interrupt
+		EXTI->RTSR &=~ PD_COMP_PIN2;	// Disable rising trigger
+		EXTI->FTSR |= PD_COMP_PIN2;		// Enable falling trigger
 
 		PD_RX_CCER_DIS();
 		PD_RX_CCMR_CC2();
@@ -268,6 +282,9 @@ static uint32_t pd_tx_prepare_cc(uint8_t cc) {
 
 void pd_init(void) {
 	GPIO_InitTypeDef GPIO_InitStruct;
+
+	// Enable SYSCFG for EXTI
+	__HAL_RCC_SYSCFG_CLK_ENABLE();
 
 	pd_select_cc(PD_CC_NC);
 	GPIO_InitStruct.Pin = GPIO_PIN_11;

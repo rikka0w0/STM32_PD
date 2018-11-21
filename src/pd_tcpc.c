@@ -11,7 +11,7 @@
 #define TCPC_FLAG_DRP_TOGGLE_AS_SRC (1<<2)
 #define TCPC_FLAG_CON_RESULT (1<<3)
 #define TCPC_FLAG_DEBOUNCING (1<<4)
-#define TCPC_FLAG_DEBOUNCE_FAILED (1<<5)
+#define TCPC_FLAG_INT_ASSERTED (1<<5)
 
 #define RX_BUFFER_SIZE 1
 
@@ -32,7 +32,7 @@ static struct pd_port_controller {
 	uint16_t alert;
 	uint16_t alert_mask;
 	/* RX enabled */
-	uint8_t rx_enabled;
+	uint8_t reg_recv_detect;
 	/* Power status */
 	uint8_t power_status;
 	uint8_t power_status_mask;
@@ -63,8 +63,11 @@ static void alert(uint16_t mask)
 	 * Only send interrupt to TCPM if corresponding
 	 * bit in the alert_enable register is set.
 	 */
-	//if (pd.alert_mask & mask)
-		//tcpc_alert(port);
+	if (pd.alert_mask & mask) {
+		__asm__ __volatile__("cpsid i");
+		pd.internal_flags |= TCPC_FLAG_INT_ASSERTED;
+		__asm__ __volatile__("cpsie i");
+	}
 }
 
 static void tcpc_alert_status_clear(uint16_t mask)
@@ -87,7 +90,11 @@ static void tcpc_alert_status_clear(uint16_t mask)
 	pd.alert &= ~mask;
 
 	/* Set Alert# inactive if all alert bits clear */
-	//if (!pd[port].alert)
+	if (!pd.alert) {
+		__asm__ __volatile__("cpsid i");
+		pd.internal_flags &=~ TCPC_FLAG_INT_ASSERTED;
+		__asm__ __volatile__("cpsie i");
+	}
 		//tcpc_alert_clear(port);
 }
 
@@ -102,6 +109,7 @@ void tcpc_init(void)
 	pd_init();
 
 	pd.cc_role_ctrl = TCPC_REG_ROLE_CTRL_SET(0, TYPEC_RP_USB, TYPEC_CC_RD, TYPEC_CC_RD);
+	pd.reg_recv_detect = 0;
 
 	/* set default alert and power mask register values */
 	pd.alert_mask = TCPC_REG_ALERT_MASK_ALL;
@@ -110,6 +118,10 @@ void tcpc_init(void)
 	// Init done!
 	pd.power_status &=~ TCPC_REG_POWER_STATUS_UNINIT;
 	alert(TCPC_REG_ALERT_POWER_STATUS);
+}
+
+uint8_t tcpc_is_int_asserted() {
+	return (pd.internal_flags&TCPC_FLAG_INT_ASSERTED) ? 1 : 0;
 }
 
 void tcpc_look4forconnection(void)
@@ -162,35 +174,38 @@ static inline void tcpc_role_ctrl_change(uint8_t newval)
 	pd.cc_last_sampled_timestamp = timestamp_get();	// Postponed the next sampling of CC line, debouncing
 }
 
-static void tcpc_i2c_write(uint32_t len, uint8_t *payload)
+void tcpc_i2c_write(uint8_t reg, uint32_t len, const uint8_t *payload)
 {
 	uint16_t alert;
+
+	if (len < 1)
+		return;
 
 	/* If we are not yet initialized, ignore any write command */
 	if (pd.power_status & TCPC_REG_POWER_STATUS_UNINIT)
 		return;
 
-	switch (payload[0]) {
+	switch (reg) {
 
 	// Alert & Masks
 	case TCPC_REG_ALERT:	// Write bit1 to clear corresponding bit
-		alert = payload[1];
-		alert |= (payload[2] << 8);
+		alert = payload[0];
+		alert |= (payload[1] << 8);
 		/* clear alert bits specified by the TCPM */
 		tcpc_alert_status_clear(alert);
 		break;
 	case TCPC_REG_ALERT_MASK:
-		pd.alert_mask = payload[1];
-		pd.alert_mask |= (payload[2] << 8);
+		pd.alert_mask = payload[0];
+		pd.alert_mask |= (payload[1] << 8);
 		break;
 
 	// Control registers
 	case TCPC_REG_TCPC_CTRL:
-		pd.cc_tcpc_ctrl = payload[1];
+		pd.cc_tcpc_ctrl = payload[0];
 		pd_select_cc(TCPC_REG_TCPC_CTRL_POLARITY(pd.cc_tcpc_ctrl) ? 2 : 1);
 		break;
 	case TCPC_REG_ROLE_CTRL:
-		tcpc_role_ctrl_change(payload[1]);
+		tcpc_role_ctrl_change(payload[0]);
 		break;
 	case TCPC_REG_POWER_CTRL:
 		//tcpc_set_vconn(TCPC_REG_POWER_CTRL_VCONN(payload[1]));
@@ -198,7 +213,7 @@ static void tcpc_i2c_write(uint32_t len, uint8_t *payload)
 
 	// Command register, write only
 	case TCPC_REG_COMMAND:
-		if (payload[1] == TCPC_REG_COMMAND_LOOK4CONNECTION) tcpc_look4forconnection();
+		if (payload[0] == TCPC_REG_COMMAND_LOOK4CONNECTION) tcpc_look4forconnection();
 		break;
 
 
@@ -208,7 +223,11 @@ static void tcpc_i2c_write(uint32_t len, uint8_t *payload)
 		break;
 
 	case TCPC_REG_RX_DETECT:
-		//tcpc_set_rx_enable(payload[1] & TCPC_REG_RX_DETECT_SOP_HRST_MASK);
+		pd.reg_recv_detect = payload[0];
+
+		if (!TCPC_REG_RX_ENABLED(pd.reg_recv_detect))
+			pd_rx_disable_monitoring();
+
 		break;
 	case TCPC_REG_POWER_STATUS_MASK:
 		//tcpc_set_power_status_mask(payload[1]);
@@ -226,9 +245,9 @@ static void tcpc_i2c_write(uint32_t len, uint8_t *payload)
 	}
 }
 
-static int tcpc_i2c_read(uint8_t *payload)
+uint32_t tcpc_i2c_read(uint8_t reg, uint8_t *payload)
 {
-	switch (payload[0]) {
+	switch (reg) {
 
 	// Alert & Masks
 	case TCPC_REG_ALERT:
@@ -282,13 +301,15 @@ static int tcpc_i2c_read(uint8_t *payload)
 		payload[0] = TCPC_REG_MSG_HDR_INFO_SET(pd.data_role, pd.power_role);
 		return 1;
 	case TCPC_REG_RX_DETECT:
-		payload[0] = pd.rx_enabled ? TCPC_REG_RX_DETECT_SOP_HRST_MASK : 0;
+		payload[0] = pd.reg_recv_detect;
 		return 1;
 
 	case TCPC_REG_RX_BYTE_CNT:
 		payload[0] = 3 + 4 *
 			PD_HEADER_CNT(pd.rx_head[pd.rx_buf_tail]);
 		return 1;
+	case TCPC_REG_RX_BUF_FRAME_TYPE:
+		return 0;
 	case TCPC_REG_RX_HDR:
 		payload[0] = pd.rx_head[pd.rx_buf_tail] & 0xff;
 		payload[1] = (pd.rx_head[pd.rx_buf_tail] >> 8) & 0xff;
@@ -308,31 +329,6 @@ static int tcpc_i2c_read(uint8_t *payload)
 		return sizeof(pd.tx_payload);
 	default:
 		return 0;
-	}
-}
-
-void tcpc_i2c_process(uint8_t read, uint32_t len, uint8_t *payload)
-{
-	/* length must always be at least 1 */
-	if (len == 0) {
-		/*
-		 * if this is a read, we must call send_response() for
-		 * i2c transaction to finishe properly
-		 */
-		//if (read)
-			//(*send_response)(0);
-	}
-
-	/* if this is a write, length must be at least 2 */
-	if (!read && len < 2)
-		return;
-
-	/* perform read or write */
-	if (read) {
-		len = tcpc_i2c_read(payload);
-		//(*send_response)(len);
-	} else {
-		tcpc_i2c_write(len, payload);
 	}
 }
 
@@ -454,5 +450,6 @@ void tcpc_run(void)
 		tcpc_detect_cc_status(cur_timestamp);
 	}
 
-
+	if (TCPC_REG_RX_ENABLED(pd.reg_recv_detect))
+		pd_rx_enable_monitoring();
 }

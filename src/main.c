@@ -3,16 +3,87 @@
 #include "platform.h"
 #include "tcpci.h"
 
+#define TCPM_STATE_DISCONNECTED 0
+#define TCPM_STATE_ASSERTING_CONNECTION 1
+#define TCPM_STATE_CONNECTED 2
+#define TCPM_STATE_ASSERTING_DISCONNECTION 3
+uint8_t tcpm_state;
+uint64_t last_timestamp;
+
+void tcpm_run(void) {
+	uint8_t buf[8];
+
+	if (tcpc_is_int_asserted()) {
+		tcpc_i2c_read(TCPC_REG_ALERT, buf);
+		if (buf[0] & TCPC_REG_ALERT_CC_STATUS) {	// CC status changed
+			tcpc_i2c_read(TCPC_REG_CC_STATUS, buf);
+
+			if (tcpm_state == TCPM_STATE_DISCONNECTED) {
+				if (TCPC_REG_CC_STATUS_TERM(buf[0])) {
+					// Presenting Rd
+
+					tcpm_state = TCPM_STATE_ASSERTING_CONNECTION;
+					last_timestamp = timestamp_get();
+				} else {
+					while(1); // WTF??
+				}
+			} else if (tcpm_state == TCPM_STATE_ASSERTING_CONNECTION) {
+				tcpm_state = TCPM_STATE_DISCONNECTED;
+				tcpc_look4forconnection();
+			} else if (tcpm_state == TCPM_STATE_CONNECTED) {
+				tcpm_state = TCPM_STATE_ASSERTING_DISCONNECTION;
+			}
+
+			// Clear CC Status Flag
+			buf[0] = TCPC_REG_ALERT_CC_STATUS;
+			tcpc_i2c_write(TCPC_REG_ALERT, 1, buf);
+		}
+	}
+
+	if (tcpm_state == TCPM_STATE_ASSERTING_CONNECTION) {
+		if (timestamp_get() > last_timestamp + 150000) { // 150ms debouncing
+			tcpm_state = TCPM_STATE_CONNECTED;
+
+			tcpc_i2c_read(TCPC_REG_CC_STATUS, buf);
+
+			// Assume we always have Rd
+			if (TCPC_REG_CC_STATUS_CC2(buf[0]) > 1) {	// 1.5A or 3.0A
+				buf[0] = 1;	// Plug Orientation = 1, monitor the CC2 pin for BMC
+				uart_puts("TCPM_STATE_CONNECTED BMC=CC2\n");
+			} else if (TCPC_REG_CC_STATUS_CC1(buf[0]) > 1){
+				buf[0] = 0; // Plug Orientation = 0, monitor the CC1 pin for BMC
+				uart_puts("TCPM_STATE_CONNECTED BMC=CC1\n");
+			}
+			tcpc_i2c_write(TCPC_REG_TCPC_CTRL, 1, buf);
+		}
+	} else if (tcpm_state == TCPM_STATE_ASSERTING_DISCONNECTION) {
+		if (timestamp_get() > last_timestamp + 50000) {	// 50ms debouncing
+			tcpm_state = TCPM_STATE_DISCONNECTED;
+			uart_puts("TCPM_STATE_DISCONNECTED\n");
+		}
+	}
+}
+
 int main(void) {
 	hw_init();
 
 	tcpc_init();
 
-	uint8_t cmd[2] = {TCPC_REG_ROLE_CTRL, TCPC_REG_ROLE_CTRL_SET(0,0,TYPEC_CC_RD,TYPEC_CC_RD)};
-	tcpc_i2c_process(0, sizeof(cmd), cmd);
+	uint8_t cmd[8];
+
+	// Clear POWER_STATUS Flag
+	cmd[0] = TCPC_REG_ALERT_POWER_STATUS;
+	tcpc_i2c_write(TCPC_REG_ALERT, 1, cmd);
+	cmd[2] = tcpc_is_int_asserted();
+	tcpm_state = TCPM_STATE_DISCONNECTED;
+
+	cmd[0] = TCPC_REG_ROLE_CTRL_SET(0,0,TYPEC_CC_RD,TYPEC_CC_RD);
+	tcpc_i2c_write(TCPC_REG_ROLE_CTRL, 1, cmd);
+	tcpc_look4forconnection();
 
 	//uart_puts("STM32 PD\n");
 	while (1)  {
 		tcpc_run();
+		tcpm_run();
 	}
 }

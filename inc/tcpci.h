@@ -7,12 +7,15 @@
 #define __PD_TCPM_TCPCI_H
 
 #include "pd.h"
+#include <stdint.h>
 
 void tcpc_init(void);
 void tcpc_run(void);
-void tcpc_i2c_process(uint8_t read, uint32_t len, uint8_t *payload);
+uint32_t tcpc_i2c_read(uint8_t reg, uint8_t *payload);
+void tcpc_i2c_write(uint8_t reg, uint32_t len, const uint8_t *payload);
 
 // The following can be called by TCPM if TCPM is on the same CPU and same task
+uint8_t tcpc_is_int_asserted(void);
 void tcpc_look4forconnection(void);
 
 enum tcpc_cc_voltage_status {
@@ -140,8 +143,18 @@ enum tcpm_transmit_type {
 #define TCPC_REG_MSG_HDR_INFO_DROLE(reg) (((reg) & 0x8) >> 3)
 #define TCPC_REG_MSG_HDR_INFO_PROLE(reg) ((reg) & 0x1)
 
-#define TCPC_REG_RX_DETECT         0x2f
-#define TCPC_REG_RX_DETECT_SOP_HRST_MASK 0x21
+// RECEIVE_DETECT register
+#define TCPC_REG_RX_DETECT         0x2F
+#define TCPC_REG_RX_DETECT_CRST 0x40	// Cable Reset
+#define TCPC_REG_RX_DETECT_HRST 0x20	// Hard Reset
+#define TCPC_REG_RX_DETECT_SOP_DBGPP 0x10
+#define TCPC_REG_RX_DETECT_SOP_DBGP 0x08
+#define TCPC_REG_RX_DETECT_SOPPP 0x04
+#define TCPC_REG_RX_DETECT_SOPP 0x02
+#define TCPC_REG_RX_DETECT_SOP 0x01
+#define TCPC_REG_RX_ENABLED(regval) (regval&0x7F)
+#define TCPC_REG_RX_DETECT_SOP_HRST_MASK (TCPC_REG_RX_DETECT_HRST|TCPC_REG_RX_DETECT_CRST)
+
 #define TCPC_REG_RX_BYTE_CNT       0x30
 #define TCPC_REG_RX_BUF_FRAME_TYPE 0x31
 
