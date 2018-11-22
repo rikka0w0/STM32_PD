@@ -39,6 +39,12 @@ void uart_put(const char c) {
 	while(!LL_USART_IsActiveFlag_TC(USART1));
 }
 
+static const char hex_table[] = {'0','1','2','3','4','5','6','7','8','9','A','B','C','D','E','F'};
+void uart_hex(char c) {
+	uart_put(hex_table[(c>>4) & 0xF]);
+	uart_put(hex_table[c & 0xF]);
+}
+
 void uart_int32(int n) {
 	char s[16];
 	int i, j, sign;

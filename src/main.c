@@ -37,6 +37,34 @@ void tcpm_run(void) {
 			// Clear CC Status Flag
 			buf[0] = TCPC_REG_ALERT_CC_STATUS;
 			tcpc_i2c_write(TCPC_REG_ALERT, 1, buf);
+		} else if (buf[0] & TCPC_REG_ALERT_RX_STATUS) {
+			if (tcpm_state == TCPM_STATE_CONNECTED) {
+				pd_message msg;
+				uint8_t len = tcpc_get_message(&msg);
+
+
+				uart_puts("packet received @");
+				uart_int32(timestamp_get());
+				for (uint8_t i=1; i<sizeof(pd_message); i++) {
+					uart_put(' ');
+					uart_hex(((uint8_t*)&msg)[i]);
+				}
+				uart_put('\n');
+
+				// Clear CC Status Flag
+				buf[0] = TCPC_REG_ALERT_RX_STATUS;
+				tcpc_i2c_write(TCPC_REG_ALERT, 1, buf);
+			}
+		} else if (buf[0] & TCPC_REG_ALERT_RX_HARD_RST) {
+			if (tcpm_state == TCPM_STATE_CONNECTED) {
+				uart_puts("HARD_RESET received @ ");
+				uart_int32(timestamp_get());
+				uart_put('\n');
+
+				// Clear CC Status Flag
+				buf[0] = TCPC_REG_ALERT_RX_HARD_RST;
+				tcpc_i2c_write(TCPC_REG_ALERT, 1, buf);
+			}
 		}
 	}
 

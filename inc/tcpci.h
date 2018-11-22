@@ -16,7 +16,18 @@ void tcpc_i2c_write(uint8_t reg, uint32_t len, const uint8_t *payload);
 
 // The following can be called by TCPM if TCPM is on the same CPU and same task
 uint8_t tcpc_is_int_asserted(void);
+void tcpc_alert_status_clear(uint16_t mask);
 void tcpc_look4forconnection(void);
+
+typedef struct __pd_message {
+	// RECEIVE_BYTE_COUNT is calculated from rx_header
+	// RX_BUF_FRAME_TYPE, RX_BUF_HEADER_BYTEx(WORD),  RX_BUF_OBJx_BYTE_x (7 DWORD)
+	uint8_t frame_type;
+	uint16_t header;
+	uint32_t payload[7];
+}pd_message;
+
+uint8_t tcpc_get_message(pd_message* msg);
 
 enum tcpc_cc_voltage_status {
 	TYPEC_CC_VOLT_OPEN = 0,		// SRC.Open, SNK.Open
@@ -138,10 +149,11 @@ enum tcpm_transmit_type {
 #define TCPC_REG_STD_OUTPUT_CAP    0x29
 
 #define TCPC_REG_MSG_HDR_INFO      0x2e
-#define TCPC_REG_MSG_HDR_INFO_SET(drole, prole) \
-		((drole) << 3 | (PD_REV20 << 1) | (prole))
+#define TCPC_REG_MSG_HDR_INFO_SET(drole, prole, rev) \
+		((drole) << 3 | (rev << 1) | (prole))
 #define TCPC_REG_MSG_HDR_INFO_DROLE(reg) (((reg) & 0x8) >> 3)
 #define TCPC_REG_MSG_HDR_INFO_PROLE(reg) ((reg) & 0x1)
+#define TCPC_REG_MSG_HDR_INFO_REV(reg) (((reg) & 0x6) >> 1)
 
 // RECEIVE_DETECT register
 #define TCPC_REG_RX_DETECT         0x2F

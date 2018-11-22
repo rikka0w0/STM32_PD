@@ -55,11 +55,12 @@ enum pd_rx_sop_types {	// negative value indicates error
 	PD_RX_SOPP = 1,
 	PD_RX_SOP = 0,
 
-	PD_RX_ERR_TIMEOUT = 0xFF,		// 0xFF, Timeout
-	PD_RX_ERR_INVAL = 0xFE,           /* Invalid packet */
-	PD_RX_ERR_CRC = 0xFD,             /* CRC mismatch */
-	PD_RX_ERR_ID = 0xFC,              /* Invalid ID number */
+	PD_RX_IDLE = 0xFF,				// Idle, no packet received
+	PD_RX_ERR_TIMEOUT = 0xFE,		// 0xFF, Timeout
+	PD_RX_ERR_INVAL = 0xFD,           /* Invalid packet */
+	PD_RX_ERR_CRC = 0xFC,             /* CRC mismatch */
 	PD_RX_ERR_UNSUPPORTED_SOP = 0xFB, /* Unsupported SOP */
+	PD_RX_ERR_OVERRUN = 0xFA		// A message arrived before the TCPC copies the old message from phy
 };
 
 enum pd_rx_special_4b5b {
@@ -78,6 +79,11 @@ void pd_select_cc(uint8_t cc);
 void pd_rx_disable_monitoring(void);
 void pd_rx_enable_monitoring(void);
 uint32_t pd_rx_started(void);
+
+uint8_t pd_phy_get_rx_type(void);
+void pd_phy_clear_rx_type(void);
+uint16_t pd_phy_get_rx_msg(uint8_t* payload);
+uint16_t tcpc_phy_get_goodcrc_header(uint8_t rx_result, uint8_t id);	// Used by PHY, Implemented in TCPC
 
 char pd_tx(void);
 void pd_prepare_message(uint16_t header, uint8_t cnt, const uint32_t *data);

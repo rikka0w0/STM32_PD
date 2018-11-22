@@ -47,6 +47,7 @@ static uint8_t* rx_ptr;
 static int b_toggle;	// Records bit sequences during Tx
 static volatile uint8_t pd_selected_cc;
 static volatile uint8_t rx_sop_type;
+static volatile uint8_t* rx_bytes;
 
 static uint64_t rx_edge_ts[PD_RX_TRANSITION_COUNT];
 static int rx_edge_ts_idx;
@@ -287,12 +288,8 @@ void pd_init(void) {
 	// Enable SYSCFG for EXTI
 	__HAL_RCC_SYSCFG_CLK_ENABLE();
 
+	rx_sop_type = PD_RX_IDLE;
 	pd_select_cc(PD_CC_NC);
-	GPIO_InitStruct.Pin = GPIO_PIN_11;
-	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-	GPIOB->ODR |= GPIO_PIN_11;
 
 	pd_rx_disable_monitoring();
 
@@ -373,6 +370,7 @@ void pd_rx_complete() {
 
 void pd_rx_start() {
 	raw_samples = (uint8_t*) raw_samples_buf;
+	rx_bytes = (uint8_t*) raw_samples_buf - 32;
 
 	// Comparator GPIO -> Alternate function mode (for TIM3_CH4)
 	GPIO_InitTypeDef GPIO_InitStruct;
@@ -583,10 +581,8 @@ static inline uint8_t pd_rx_decode_byte(void) {
 
 	return 0;
 }
-uint8_t ent=0;uint32_t msgreq = 0x230320C8;
-static inline uint8_t pd_rx_process(void) {
-	ent++;
 
+static inline uint8_t pd_rx_process(void) {
 	uint8_t sop = pd_find_preamble();
 	if (sop == PD_RX_SOP) {
 #ifdef PD_PHY_DETECT_ALL_SOP
@@ -670,33 +666,15 @@ static inline uint8_t pd_rx_process(void) {
 	if (crcr != crcc)
 		return PD_RX_ERR_CRC;
 
-	//return sop;
-
-	if (ent==2)
-		while(1);
-
-	uint8_t id = PD_HEADER_ID(header);
-	header = PD_HEADER(1, 0,	// Sink
-			0, id, 0, PD_REV, 0);	// UFP
-
-	pd_prepare_message(header, 0, 0);
-
-	if (pd_tx() < 0)
-		/* another packet recvd before we could send goodCRC */
-		return PD_RX_ERR_INVAL;
-
-    GPIOB->ODR &= ~GPIO_PIN_11;
-	HAL_Delay(2);
-//	header = PD_HEADER(2, 0,	// Sink
-//			0, 0, 0, PD_REV, 0);	// UFP
-	header= 0x1042;
-	pd_prepare_message(header, 1, &msgreq);
-	if (pd_tx() < 0)
-		/* another packet recvd before we could send goodCRC */
-		return PD_RX_ERR_INVAL;
-
-	pd_rx_enable_monitoring();
 	return sop;
+}
+
+static inline void copy_msg(void) {
+	uint8_t byte_count = 2 + (PD_HEADER_CNT(*((uint16_t*)raw_samples)) << 2);
+
+	for (uint8_t i=0; i<byte_count; i++){
+		rx_bytes[i] = raw_samples[i];
+	}
 }
 
 void pd_rx_isr_handler(void) {
@@ -728,12 +706,45 @@ void pd_rx_isr_handler(void) {
 
 			/* trigger the analysis in the task */
 			rx_sop_type = pd_rx_process();
+
+			uint16_t goodcrc_header = tcpc_phy_get_goodcrc_header(
+					rx_sop_type, 								// SOP type
+					PD_HEADER_ID(*((uint16_t*)raw_samples))		// Message ID
+					);
+			if (goodcrc_header != 0xFF) {
+				// Respond GoodCRC if necessary
+
+				// Copy received data to buffer
+				copy_msg();
+
+				pd_prepare_message(goodcrc_header, 0, NULL);
+				pd_tx();
+			}
 		} else {
 			/* do not trigger RX start, just clear int */
 			__HAL_GPIO_EXTI_CLEAR_IT(pd_comp_pin);
 		}
 		rx_edge_ts_idx = next_idx;
 	}
+}
+
+uint8_t pd_phy_get_rx_type(void) {
+	return rx_sop_type;
+}
+
+void pd_phy_clear_rx_type(void) {
+	rx_sop_type = PD_RX_IDLE;
+}
+
+uint16_t pd_phy_get_rx_msg(uint8_t* payload) {
+	uint16_t header = *((uint16_t*)rx_bytes);
+	uint8_t byte_count = (PD_HEADER_CNT(header) << 2);
+
+	for (uint8_t i=0; i<byte_count; i++){
+		payload[i] = rx_bytes[i+2];
+	}
+
+	return header;
 }
 
 /**

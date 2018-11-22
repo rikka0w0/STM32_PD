@@ -13,6 +13,7 @@ uint64_t timestamp_get(void);
 size_t uart_strlen(const char * str);
 void uart_puts(const char *str);
 void uart_put(const char c);
+void uart_hex(char c);
 void uart_int32(int n);
 
 // CRC
