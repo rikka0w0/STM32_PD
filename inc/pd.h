@@ -1,6 +1,24 @@
 #ifndef __PD_DEF_H
 #define __PD_DEF_H
 
+#define PD_REV 1	// PD2.0 spec.
+
+/* build message header */
+#define PD_HEADER(type, prole, drole, id, cnt, rev, ext) \
+	((type) | ((rev) << 6) | \
+	((drole) << 5) | ((prole) << 8) | \
+	((id) << 9) | ((cnt) << 12) | ((ext) << 15))
+
+/* Used for processing pd header */
+#define PD_HEADER_EXT(header)  (((header) >> 15) & 1)
+#define PD_HEADER_CNT(header)  (((header) >> 12) & 7)
+#define PD_HEADER_TYPE(header) ((header) & 0xF)
+#define PD_HEADER_ID(header)   (((header) >> 9) & 7)
+#define PD_HEADER_REV(header)  (((header) >> 6) & 3)
+
+/* Default retry count for transmitting */
+#define PD_RETRY_COUNT 3
+
 /* Control Message type */
 enum pd_ctrl_msg_type {
 	/* 0 Reserved */

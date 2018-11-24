@@ -8,6 +8,9 @@
 #define TCPM_STATE_CONNECTED 2
 #define TCPM_STATE_ASSERTING_DISCONNECTION 3
 uint8_t tcpm_state;
+#define PD_JUST_CONNECTED 0
+#define PD_SRC_CAP_RECVED 1
+uint8_t tcpm_pd_state;
 uint64_t last_timestamp;
 
 void tcpm_run(void) {
@@ -54,6 +57,10 @@ void tcpm_run(void) {
 				// Clear CC Status Flag
 				buf[0] = TCPC_REG_ALERT_RX_STATUS;
 				tcpc_i2c_write(TCPC_REG_ALERT, 1, buf);
+//
+//				if (PD_HEADER_CNT(msg.header)>0 && PD_HEADER_TYPE(msg.header) == PD_EXT_SOURCE_CAP) {
+//					tcpm_pd_state = PD_SRC_CAP_RECVED;
+//				}
 			}
 		} else if (buf[0] & TCPC_REG_ALERT_RX_HARD_RST) {
 			if (tcpm_state == TCPM_STATE_CONNECTED) {
@@ -92,6 +99,8 @@ void tcpm_run(void) {
 			tcpm_state = TCPM_STATE_DISCONNECTED;
 			uart_puts("TCPM_STATE_DISCONNECTED\n");
 		}
+	} else if (tcpm_state == TCPM_STATE_CONNECTED) {
+
 	}
 }
 

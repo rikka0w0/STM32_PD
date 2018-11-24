@@ -179,6 +179,7 @@ enum tcpm_transmit_type {
 #define TCPC_REG_TRANSMIT_RETRY(reg) (((reg) & 0x30) >> 4)
 #define TCPC_REG_TRANSMIT_TYPE(reg)  ((reg) & 0x7)
 
+#define TCPC_REG_TRANSMIT_BUFFER   0x51
 #define TCPC_REG_TX_BYTE_CNT       0x51
 #define TCPC_REG_TX_HDR            0x52
 #define TCPC_REG_TX_DATA           0x54 /* through 0x6f */

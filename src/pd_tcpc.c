@@ -12,6 +12,7 @@
 #define TCPC_FLAG_CON_RESULT (1<<3)
 #define TCPC_FLAG_DEBOUNCING (1<<4)
 #define TCPC_FLAG_INT_ASSERTED (1<<5)
+#define TCPC_FLAG_TX_PENDING (1<<6)
 
 #define RX_BUFFER_SIZE 1
 
@@ -36,15 +37,16 @@ static struct pd_port_controller {
 	uint8_t reg_msg_header_info;
 
 	/* Last received */
-	pd_message rx_message[RX_BUFFER_SIZE+1];
-	// Head = next available slot, Tail points to the last added
-	int rx_buf_head, rx_buf_tail;
+	pd_message rx_message[RX_BUFFER_SIZE];
+	// Tail points to the last added
+	int rx_buf_count, rx_buf_tail;
 
 	/* Next transmit */
 	enum tcpm_transmit_type tx_type;
-	uint16_t tx_head;
-	uint32_t tx_payload[7];
-	const uint32_t *tx_data;
+	uint8_t tx_retry_count;
+	uint8_t tx_len;
+	uint8_t tx_payload[30];
+	uint64_t tx_start_timestamp;
 
 	/* Internal Flags */
 	uint32_t internal_flags;
@@ -53,18 +55,6 @@ static struct pd_port_controller {
 	uint64_t cc_last_sampled_timestamp;
 } pd;
 
-static int rx_buf_is_full()
-{
-	/* Buffer is full i f the tail is 1 ahead of head */
-	int diff = pd.rx_buf_tail - pd.rx_buf_head;
-	return (diff == 1) || (diff == -RX_BUFFER_SIZE);
-}
-
-static int rx_buf_is_empty()
-{
-	/* Buffer is empty if the head and tail are the same */
-	return pd.rx_buf_tail == pd.rx_buf_head;
-}
 
 static void alert(uint16_t mask)
 {
@@ -89,12 +79,15 @@ void tcpc_alert_status_clear(uint16_t mask)
 	 * the RX status alert active.
 	 */
 	if (mask & TCPC_REG_ALERT_RX_STATUS) {
-		if (!rx_buf_is_empty()) {
+		if (pd.rx_buf_count > 0) {
 			// Remove the oldest message from buffer
 			__asm__ __volatile__("cpsid i");
-			pd.rx_buf_tail = (pd.rx_buf_tail==RX_BUFFER_SIZE) ? 0 : pd.rx_buf_tail+1;
+			pd.rx_buf_tail++;
+			if (pd.rx_buf_tail >= RX_BUFFER_SIZE)
+				pd.rx_buf_tail -= RX_BUFFER_SIZE;
+			pd.rx_buf_count--;
 			__asm__ __volatile__("cpsie i");
-			if (!rx_buf_is_empty())
+			if (pd.rx_buf_count > 0)
 				/* buffer is not empty, keep alert active */
 				mask &= ~TCPC_REG_ALERT_RX_STATUS;
 		}
@@ -112,7 +105,7 @@ void tcpc_alert_status_clear(uint16_t mask)
 }
 
 uint8_t tcpc_get_message(pd_message* msg) {
-	if (msg != 0 && !rx_buf_is_empty()) {
+	if (msg != 0 && pd.rx_buf_count>0) {
 		for (uint8_t i=0; i<sizeof(pd_message); i++) {
 			((uint8_t*)msg)[i] = ((uint8_t*)&pd.rx_message[pd.rx_buf_tail])[i];
 		}
@@ -221,6 +214,9 @@ void tcpc_i2c_write(uint8_t reg, uint32_t len, const uint8_t *payload)
 		pd.alert_mask = payload[0];
 		pd.alert_mask |= (payload[1] << 8);
 		break;
+	case TCPC_REG_POWER_STATUS_MASK:
+		pd.power_status_mask = payload[0];
+		break;
 
 	// Control registers
 	case TCPC_REG_TCPC_CTRL:
@@ -255,18 +251,18 @@ void tcpc_i2c_write(uint8_t reg, uint32_t len, const uint8_t *payload)
 		break;
 
 
-	case TCPC_REG_POWER_STATUS_MASK:
-		//tcpc_set_power_status_mask(payload[1]);
-		break;
-	case TCPC_REG_TX_HDR:
-		pd.tx_head = (payload[2] << 8) | payload[1];
-		break;
-	case TCPC_REG_TX_DATA:
-		//memcpy(pd.tx_payload, &payload[1], len - 1);
-		break;
 	case TCPC_REG_TRANSMIT:
-		//tcpc_transmit(TCPC_REG_TRANSMIT_TYPE(payload[1]),
-		//	      pd.tx_head, pd.tx_payload);
+		pd.tx_type = TCPC_REG_TRANSMIT_TYPE(payload[0]);
+
+		pd.internal_flags |= TCPC_FLAG_TX_PENDING;
+		pd.tx_retry_count = 0;
+		break;
+	case TCPC_REG_TRANSMIT_BUFFER:
+		pd.tx_len = payload[0];
+
+		for (uint8_t i=0; i<pd.tx_len; i++)
+			pd.tx_payload[i] = payload[i+1];
+
 		break;
 	}
 }
@@ -345,14 +341,6 @@ uint32_t tcpc_i2c_read(uint8_t reg, uint8_t *payload)
 		       sizeof(pd.rx_message[pd.rx_buf_tail].payload));
 		return sizeof(pd.rx_message[pd.rx_buf_tail].payload);
 
-	case TCPC_REG_TX_HDR:
-		payload[0] = pd.tx_head & 0xff;
-		payload[1] = (pd.tx_head >> 8) & 0xff;
-		return 2;
-	case TCPC_REG_TX_DATA:
-		memcpy(payload, pd.tx_payload,
-		       sizeof(pd.tx_payload));
-		return sizeof(pd.tx_payload);
 	default:
 		return 0;
 	}
@@ -437,8 +425,10 @@ static inline void tcpc_detect_cc_status(uint64_t cur_timestamp)
 
 uint16_t tcpc_phy_get_goodcrc_header(uint8_t rx_result, uint8_t id) {
 	// True if the packet type is supported
-	if ((rx_result >= PD_RX_SOP && rx_result <= PD_RX_SOP_DBGPP)
-			&& !rx_buf_is_full()) {
+	if (pd.rx_buf_count >= RX_BUFFER_SIZE) {
+		return 0xFE;
+	} else if (rx_result >= PD_RX_SOP && rx_result <= PD_RX_SOP_DBGPP) {
+		// Buffer has room
 		return PD_HEADER(
 				PD_CTRL_GOOD_CRC,
 				TCPC_REG_MSG_HDR_INFO_PROLE(pd.reg_msg_header_info),
@@ -448,8 +438,33 @@ uint16_t tcpc_phy_get_goodcrc_header(uint8_t rx_result, uint8_t id) {
 				TCPC_REG_MSG_HDR_INFO_REV(pd.reg_msg_header_info),
 				0);	// GoodCRC cannot be extended
 	} else {
+		// Received Hard Reset or Cable Reset
 		return 0xFF;
 	}
+}
+
+static inline uint8_t check_goodcrc(void) {
+	uint16_t goodcrc_header = pd_phy_get_rx_msg(0);
+	uint16_t sent_header = pd.tx_payload[0];
+	sent_header |= ((uint16_t)pd.tx_payload[1]) << 8;
+
+	return (goodcrc_header == TCPC_REG_TRANSMIT_TYPE(pd.tx_type) &&
+		PD_HEADER_CNT(goodcrc_header) == 0 &&
+		PD_HEADER_TYPE(goodcrc_header) == PD_CTRL_GOOD_CRC &&
+		PD_HEADER_ID(goodcrc_header) == PD_HEADER_ID(sent_header)) ? 1 : 0;
+}
+
+static inline void rx_buf_put(uint8_t frame_type) {
+	uint8_t rx_buf_head = pd.rx_buf_tail + pd.rx_buf_count;
+
+	if (rx_buf_head >= RX_BUFFER_SIZE)
+		rx_buf_head -= RX_BUFFER_SIZE;
+
+	pd.rx_message[rx_buf_head].frame_type = frame_type;
+	pd.rx_message[rx_buf_head].header =
+			pd_phy_get_rx_msg((uint8_t*)(&pd.rx_message[rx_buf_head].payload));
+
+	pd.rx_buf_count++;
 }
 
 // Run TCPC state machine once
@@ -464,7 +479,13 @@ void tcpc_run(void)
 		phy_rx_result = pd_phy_get_rx_type();
 		if (phy_rx_result != PD_RX_IDLE) {
 			if (phy_rx_result >= PD_RX_SOP && phy_rx_result <= PD_RX_ERR_CABLE_RESET) {
-				if (pd.reg_recv_detect&(1<<phy_rx_result)) {
+				if (pd.internal_flags&TCPC_FLAG_TX_PENDING) {
+					// TX, waiting for GoodCRC
+
+					if (check_goodcrc()) {
+						pd.internal_flags &=~ TCPC_FLAG_TX_PENDING;
+					}
+				} else if (pd.reg_recv_detect&(1<<phy_rx_result)) {
 					/*
 					 * If there is space in buffer, then increment head to keep
 					 * the message and send goodCRC. If this is a hard reset,
@@ -475,20 +496,36 @@ void tcpc_run(void)
 
 					if (phy_rx_result == PD_RX_ERR_HARD_RESET) {
 						alert(TCPC_REG_ALERT_RX_HARD_RST);
-					} else if (!rx_buf_is_full()){
-						pd.rx_message[pd.rx_buf_tail].frame_type = phy_rx_result;
-						pd.rx_message[pd.rx_buf_tail].header =
-								pd_phy_get_rx_msg((uint8_t*)(&pd.rx_message[pd.rx_buf_tail].payload));
-
-						// Increase the buffer head
-						pd.rx_buf_head = (pd.rx_buf_head==RX_BUFFER_SIZE) ? 0 : pd.rx_buf_head+1;
+					} else if (pd.rx_buf_count < RX_BUFFER_SIZE){
+						// Buffer is not full
+						rx_buf_put(phy_rx_result);
 
 						alert(TCPC_REG_ALERT_RX_STATUS);
 					}
 				}
+			} else if (phy_rx_result == PD_RX_ERR_OVERRUN) {
+				alert(TCPC_REG_ALERT_RX_STATUS);
 			}
 
 			pd_phy_clear_rx_type();
+		}
+
+		if (pd.internal_flags&TCPC_FLAG_TX_PENDING) {
+			// We have a Tx request pending
+
+			if (pd.tx_retry_count == 0) {
+				pd.tx_retry_count++;
+
+				pd_prepare_message(TCPC_REG_TRANSMIT_TYPE(pd.tx_type), 1, 0);
+				pd_tx();
+				pd.tx_start_timestamp = cur_timestamp;
+			}
+
+			if (pd.tx_retry_count > PD_RETRY_COUNT) {
+				// Transmission retry failed
+
+				pd.internal_flags &=~ TCPC_FLAG_TX_PENDING;
+			}
 		}
 
 		pd_rx_enable_monitoring();

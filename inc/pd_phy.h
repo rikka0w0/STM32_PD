@@ -15,8 +15,6 @@
 #define PD_CC_2		0x02
 #define PD_CC_UNDEF	PD_CC_MASK
 
-#define PD_REV 1	// PD2.0 spec.
-
 /*
  * Maximum size of a Power Delivery packet (in bits on the wire) :
  *    16-bit header + 0..7 32-bit data objects  (+ 4b5b encoding)
@@ -32,19 +30,6 @@
 /* Timeout for message receive in microseconds */
 #define USB_PD_RX_TMOUT_US 1800
 #define PD_RX_THRESHOLD 30	// @ 12 MHz Timer rate
-
-/* build message header */
-#define PD_HEADER(type, prole, drole, id, cnt, rev, ext) \
-	((type) | ((rev) << 6) | \
-	((drole) << 5) | ((prole) << 8) | \
-	((id) << 9) | ((cnt) << 12) | ((ext) << 15))
-
-/* Used for processing pd header */
-#define PD_HEADER_EXT(header)  (((header) >> 15) & 1)
-#define PD_HEADER_CNT(header)  (((header) >> 12) & 7)
-#define PD_HEADER_TYPE(header) ((header) & 0xF)
-#define PD_HEADER_ID(header)   (((header) >> 9) & 7)
-#define PD_HEADER_REV(header)  (((header) >> 6) & 3)
 
 enum pd_rx_sop_types {	// negative value indicates error
 	PD_RX_ERR_CABLE_RESET = 6,
@@ -64,13 +49,13 @@ enum pd_rx_sop_types {	// negative value indicates error
 };
 
 enum pd_rx_special_4b5b {
-	TABLE_5b4b_ERR = 16,
-	TABLE_5b4b_SYNC1 = 17,
-	TABLE_5b4b_SYNC2 = 18,
-	TABLE_5b4b_SYNC3 = 19,
-	TABLE_5b4b_RST1 = 20,
-	TABLE_5b4b_RST2 = 21,
-	TABLE_5b4b_EOP = 22
+	TABLE_5b4b_SYNC1 = 16,
+	TABLE_5b4b_SYNC2 = 17,
+	TABLE_5b4b_RST1 = 18,
+	TABLE_5b4b_RST2 = 19,
+	TABLE_5b4b_EOP = 20,
+	TABLE_5b4b_SYNC3 = 21,
+	TABLE_5b4b_ERR = 22
 };
 
 void pd_init(void);
@@ -86,7 +71,7 @@ uint16_t pd_phy_get_rx_msg(uint8_t* payload);
 uint16_t tcpc_phy_get_goodcrc_header(uint8_t rx_result, uint8_t id);	// Used by PHY, Implemented in TCPC
 
 char pd_tx(void);
-void pd_prepare_message(uint16_t header, uint8_t cnt, const uint32_t *data);
+void pd_prepare_message(uint8_t sop_type, uint8_t cnt, const uint8_t* data);
 
 // CC Rp/Rd & Vconn control
 void pd_cc_rprp_init(void);

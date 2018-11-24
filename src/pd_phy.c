@@ -1,5 +1,6 @@
 #include "platform.h"
 #include "pd_phy.h"
+#include "pd.h"
 
 // Configuration Start ---------------------------------------------------
 #define PD_PHY_DETECT_ALL_SOP
@@ -67,6 +68,14 @@ static int rx_edge_ts_idx;
 		^ (x &  8 ? 0x040 : 0x3C0) \
 		^ (x & 16 ? 0x100 : 0x300))
 
+static const uint16_t bmcsop[] = {
+	BMC(PD_SYNC1), BMC(PD_SYNC1), BMC(PD_SYNC1), BMC(PD_SYNC2),	// SOP
+	BMC(PD_SYNC1), BMC(PD_SYNC1), BMC(PD_SYNC3), BMC(PD_SYNC3),	// SOPP
+	BMC(PD_SYNC1), BMC(PD_SYNC3), BMC(PD_SYNC1), BMC(PD_SYNC3),	// SOPPP
+	BMC(PD_SYNC1), BMC(PD_RST2), BMC(PD_RST2), BMC(PD_SYNC3),	// SOP_DBGP
+	BMC(PD_SYNC1), BMC(PD_RST2), BMC(PD_SYNC3), BMC(PD_SYNC2)	// SOP_DBGPP
+};
+
 /* 4b/5b + Bimark Phase encoding */
 static const uint16_t bmc4b5b[] = {
 /* 0 = 0000 */ BMC(0x1E) /* 11110 */,
@@ -85,11 +94,11 @@ static const uint16_t bmc4b5b[] = {
 /* D = 1101 */ BMC(0x1B) /* 11011 */,
 /* E = 1110 */ BMC(0x1C) /* 11100 */,
 /* F = 1111 */ BMC(0x1D) /* 11101 */,
-/* Sync-1      K-code       11000 Startsynch #1 */
-/* Sync-2      K-code       10001 Startsynch #2 */
-/* RST-1       K-code       00111 Hard Reset #1 */
-/* RST-2       K-code       11001 Hard Reset #2 */
-/* EOP         K-code       01101 EOP End Of Packet */
+/* Sync-1   */ BMC(PD_SYNC1) /* 11000 Startsynch #1 */,
+/* Sync-2   */ BMC(PD_SYNC2) /* 10001 Startsynch #2 */,
+/* RST-1    */ BMC(PD_RST1) /* 00111 Hard Reset #1 */,
+/* RST-2    */ BMC(PD_RST2) /* 11001 Hard Reset #2 */,
+/* EOP      */ BMC(PD_EOP) /* 01101 EOP End Of Packet */,
 /* Reserved    Error        00000 */
 /* Reserved    Error        00001 */
 /* Reserved    Error        00010 */
@@ -98,7 +107,7 @@ static const uint16_t bmc4b5b[] = {
 /* Reserved    Error        00101 */
 /* Reserved    Error        00110 */
 /* Reserved    Error        01000 */
-/* Reserved    Error        01100 */
+/* Sync-2   */ BMC(PD_SYNC3) /* 01100 Startsynch #23 */
 /* Reserved    Error        10000 */
 /* Reserved    Error        11111 */
 };
@@ -662,7 +671,6 @@ static inline uint8_t pd_rx_process(void) {
 		return PD_RX_ERR_INVAL;
 	crcr |= (*rx_ptr)<<24;
 
-	pd_rx_complete();	// Ignore EOP
 	if (crcr != crcc)
 		return PD_RX_ERR_CRC;
 
@@ -707,22 +715,38 @@ void pd_rx_isr_handler(void) {
 			/* trigger the analysis in the task */
 			rx_sop_type = pd_rx_process();
 
-			uint16_t goodcrc_header = tcpc_phy_get_goodcrc_header(
-					rx_sop_type, 								// SOP type
-					PD_HEADER_ID(*((uint16_t*)raw_samples))		// Message ID
-					);
-			if (goodcrc_header != 0xFF) {
-				// Respond GoodCRC if necessary
+			pd_rx_complete();	// Ignore EOP
+
+			uint16_t header = *((uint16_t*)raw_samples);
+			if (PD_HEADER_CNT(header) == 0 && PD_HEADER_TYPE(header) == PD_CTRL_GOOD_CRC) {
+				// Received GoodCRC message
 
 				// Copy received data to buffer
 				copy_msg();
+			} else {
+				// Received other GoodCRC
+				header = tcpc_phy_get_goodcrc_header(
+						rx_sop_type, 				// SOP type
+						PD_HEADER_ID(header)		// Message ID
+						);
+				if (header == 0xFE) {
+					// The Rx buffer is full, do not send GoodCRC
+					rx_sop_type = PD_RX_ERR_OVERRUN;
+				} else if (header != 0xFF) {
+					// Respond GoodCRC if necessary
 
-				pd_prepare_message(goodcrc_header, 0, NULL);
-				pd_tx();
+					// Copy received data to buffer
+					copy_msg();
+
+					pd_prepare_message(rx_sop_type, 2, (uint8_t*)(&header));
+					pd_tx();
+				}
 			}
+
+			// End of ISR handler
 		} else {
 			/* do not trigger RX start, just clear int */
-			__HAL_GPIO_EXTI_CLEAR_IT(pd_comp_pin);
+			EXTI->PR = pd_comp_pin;
 		}
 		rx_edge_ts_idx = next_idx;
 	}
@@ -738,6 +762,9 @@ void pd_phy_clear_rx_type(void) {
 
 uint16_t pd_phy_get_rx_msg(uint8_t* payload) {
 	uint16_t header = *((uint16_t*)rx_bytes);
+	if (payload == 0)
+		return header;
+
 	uint8_t byte_count = (PD_HEADER_CNT(header) << 2);
 
 	for (uint8_t i=0; i<byte_count; i++){
@@ -878,30 +905,28 @@ void pd_write_last_edge(void) {
  * cnt: the number of 32-bit payloads (same as the Number of Data Objects field in the Message Header)
  * data: a pointer to the payload buffer, 0 if the message is a control message
  */
-void pd_prepare_message(uint16_t header, uint8_t cnt, const uint32_t *data) {
-	pd_write_preamble();
-	pd_write_sym(BMC(PD_SYNC1));
-	pd_write_sym(BMC(PD_SYNC1));
-	pd_write_sym(BMC(PD_SYNC1));
-	pd_write_sym(BMC(PD_SYNC2));
+void pd_prepare_message(uint8_t sop_type, uint8_t cnt, const uint8_t* data) {
+	uint8_t i;
 
-	pd_write_sym(bmc4b5b[(header >> 0) & 0xF]);
-	pd_write_sym(bmc4b5b[(header >> 4) & 0xF]);
-	pd_write_sym(bmc4b5b[(header >> 8) & 0xF]);
-	pd_write_sym(bmc4b5b[(header >> 12) & 0xF]);
+	pd_write_preamble();
+
+#ifdef PD_PHY_DETECT_ALL_SOP
+	// Write SOP
+	for (i = 0; i < 4; i++)
+		pd_write_sym(bmcsop[i+(sop_type<<2)]);
+#else
+	pd_write_sym(bmc4b5b[TABLE_5b4b_SYNC1]);
+	pd_write_sym(bmc4b5b[TABLE_5b4b_SYNC1]);
+	pd_write_sym(bmc4b5b[TABLE_5b4b_SYNC1]);
+	pd_write_sym(bmc4b5b[TABLE_5b4b_SYNC2]);
+#endif
+
 
 	crc32_init();
-	crc32_hash16(header);
-	for (uint8_t i = 0; i < cnt; i++) {
-		pd_write_sym(bmc4b5b[(data[i] >> 0) & 0xF]);
+	for (i = 0; i < cnt; i++) {
+		pd_write_sym(bmc4b5b[data[i] & 0xF]);
 		pd_write_sym(bmc4b5b[(data[i] >> 4) & 0xF]);
-		pd_write_sym(bmc4b5b[(data[i] >> 8) & 0xF]);
-		pd_write_sym(bmc4b5b[(data[i] >> 12) & 0xF]);
-		pd_write_sym(bmc4b5b[(data[i] >> 16) & 0xF]);
-		pd_write_sym(bmc4b5b[(data[i] >> 20) & 0xF]);
-		pd_write_sym(bmc4b5b[(data[i] >> 24) & 0xF]);
-		pd_write_sym(bmc4b5b[(data[i] >> 28) & 0xF]);
-		crc32_hash32(data[i]);
+		crc32_hash8(data[i]);
 	}
 
 	uint32_t crc = crc32_result();
