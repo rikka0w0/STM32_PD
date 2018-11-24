@@ -34,6 +34,8 @@
 #define PD_COMP_PIN(cc) (cc==PD_CC_1 ? PD_COMP_PIN1 : PD_COMP_PIN2)
 #define PD_RX_TIMEOUT() (TIM3->SR & 4)
 #define PD_TX_DMA_CHANNEL DMA1_Channel3		// SPI1_Tx
+#define PD_TX_DMA_IRQ DMA1_Channel2_3_IRQn
+#define PD_TX_DMA_IRQ_CLEAR() (DMA1->IFCR |= DMA_IFCR_CGIF3)
 // -----------------------------------------------------------------------
 
 // Utility macros --------------------------------------------------------
@@ -49,6 +51,7 @@ static int b_toggle;	// Records bit sequences during Tx
 static volatile uint8_t pd_selected_cc;
 static volatile uint8_t rx_sop_type;
 static volatile uint8_t* rx_bytes;
+static volatile uint8_t tx_goingon;
 
 static uint64_t rx_edge_ts[PD_RX_TRANSITION_COUNT];
 static int rx_edge_ts_idx;
@@ -305,6 +308,8 @@ void pd_init(void) {
 	/* EXTI interrupt init*/
 	HAL_NVIC_SetPriority(PD_COMP_EXTI, 1, 0);
 	HAL_NVIC_EnableIRQ(PD_COMP_EXTI);
+	HAL_NVIC_SetPriority(PD_TX_DMA_IRQ, 1, 0);
+	HAL_NVIC_EnableIRQ(PD_TX_DMA_IRQ);
 
 	// TIM3
     __HAL_RCC_TIM3_CLK_ENABLE();
@@ -739,7 +744,7 @@ void pd_rx_isr_handler(void) {
 					copy_msg();
 
 					pd_prepare_message(rx_sop_type, 2, (uint8_t*)(&header));
-					pd_tx();
+					pd_tx(1);
 				}
 			}
 
@@ -774,14 +779,21 @@ uint16_t pd_phy_get_rx_msg(uint8_t* payload) {
 	return header;
 }
 
+uint8_t pd_phy_is_txing(void) {
+	return tx_goingon;
+}
+
 /**
  * Transmit an encoded PD message to the active cc line. Return negative if something goes wrong.
  */
-char pd_tx(void) {
+char pd_tx(uint8_t send_goodcrc) {
 	pd_rx_disable_monitoring();
 
 	if (pd_rx_started())
 		return -1;
+
+	// 0xFF - Monitor for incoming GoodCRC after transmission
+	tx_goingon = send_goodcrc ? 1 : 0xFF;
 
 	// Config CC GPIO for Tx
 	uint32_t cc = pd_tx_prepare_cc(pd_selected_cc);	// Get the GPIO mask
@@ -808,14 +820,20 @@ char pd_tx(void) {
 	PD_TX_DMA_CHANNEL->CCR = 0;
 	// Clear ISR
 	DMA1->IFCR = 0xF00;
-	// Priority very high, MSIZE=8, PSIZE=8, Memory increment mode, Memory->Peripheral
-	PD_TX_DMA_CHANNEL->CCR = (3<<DMA_CCR_PL_Pos) | (0<<DMA_CCR_MSIZE_Pos) | (0<<DMA_CCR_PSIZE_Pos) | DMA_CCR_MINC | DMA_CCR_DIR;
+
+	PD_TX_DMA_CHANNEL->CCR =
+			(3<<DMA_CCR_PL_Pos) |		// Priority very high
+			(0<<DMA_CCR_MSIZE_Pos) |	// MSIZE=8
+			(0<<DMA_CCR_PSIZE_Pos) |	// PSIZE=8
+			DMA_CCR_MINC |				// Memory increment mode
+			DMA_CCR_DIR |				// Memory->Peripheral
+			DMA_CCR_TCIE;				// Generate an interrupt at the end of DMA transfer
 	PD_TX_DMA_CHANNEL->CNDTR = DIV_ROUND_UP(raw_ptr, 8);
 	PD_TX_DMA_CHANNEL->CPAR = (uint32_t)(&(SPI1->DR));
 	PD_TX_DMA_CHANNEL->CMAR = (uint32_t)raw_samples_buf;
 
-	// Flush data in write buffer so that DMA can get the lastest data
-	asm volatile("dmb;");
+	// Flush data in write buffer so that DMA can get the latest data
+	asm volatile("dsb;");
 	DMA1->IFCR = 0xF00;
 
 	// Enable DMA
@@ -829,6 +847,14 @@ char pd_tx(void) {
 	// Start PD Tx clock
 	TIM14->CR1 |= TIM_CR1_CEN;
 
+	// After Tx done, DMA_TransferComplete interrupt will be triggered
+	return 0;
+}
+
+void pd_tx_isr_handler(void) {
+	PD_TX_DMA_IRQ_CLEAR();
+
+	// Wait for the end of transmission
 	while (SPI1->SR & SPI_SR_FTLVL)
 		; /* wait for TX FIFO empty */
 	while (SPI1->SR & SPI_SR_BSY)
@@ -843,7 +869,10 @@ char pd_tx(void) {
 	__HAL_RCC_SPI1_FORCE_RESET();
 	__HAL_RCC_SPI1_RELEASE_RESET();
 
-	return 0;
+	if (tx_goingon == 0xFF)
+		pd_rx_enable_monitoring();
+
+	tx_goingon = 0;
 }
 
 void pd_write_preamble(void) {

@@ -68,9 +68,10 @@ uint32_t pd_rx_started(void);
 uint8_t pd_phy_get_rx_type(void);
 void pd_phy_clear_rx_type(void);
 uint16_t pd_phy_get_rx_msg(uint8_t* payload);
+uint8_t pd_phy_is_txing(void);
 uint16_t tcpc_phy_get_goodcrc_header(uint8_t rx_result, uint8_t id);	// Used by PHY, Implemented in TCPC
 
-char pd_tx(void);
+char pd_tx(uint8_t send_goodcrc);
 void pd_prepare_message(uint8_t sop_type, uint8_t cnt, const uint8_t* data);
 
 // CC Rp/Rd & Vconn control

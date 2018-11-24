@@ -45,3 +45,8 @@ extern void pd_rx_isr_handler(void);
 void EXTI0_1_IRQHandler(void) {
 	pd_rx_isr_handler();
 }
+
+extern void pd_tx_isr_handler(void);
+void DMA1_CH2_3_IRQHandler(void) {
+	pd_tx_isr_handler();
+}

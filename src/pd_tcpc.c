@@ -517,7 +517,7 @@ void tcpc_run(void)
 				pd.tx_retry_count++;
 
 				pd_prepare_message(TCPC_REG_TRANSMIT_TYPE(pd.tx_type), 1, 0);
-				pd_tx();
+				pd_tx(0);
 				pd.tx_start_timestamp = cur_timestamp;
 			}
 
@@ -528,7 +528,8 @@ void tcpc_run(void)
 			}
 		}
 
-		pd_rx_enable_monitoring();
+		if (!pd_phy_is_txing())
+			pd_rx_enable_monitoring();
 		__asm__ __volatile__("cpsie i");
 	}
 
