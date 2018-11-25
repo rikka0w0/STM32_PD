@@ -114,6 +114,18 @@ uint8_t tcpc_get_message(pd_message* msg) {
 	return 0xFF;
 }
 
+void tcpc_send_message(const pd_message* msg) {
+	pd.tx_type = msg->frame_type;
+	pd.tx_len = PD_HEADER_CNT(msg->header) << 2;
+	pd.tx_payload[0] = msg->header & 0xFF;
+	pd.tx_payload[1] = (msg->header >> 8) & 0xFF;
+	for (uint8_t i=0; i<pd.tx_len; i++)
+		pd.tx_payload[i+2] = ((uint8_t*)&msg->payload)[i];
+	pd.tx_len += 2;
+	pd.internal_flags |= TCPC_FLAG_TX_PENDING;
+	pd.tx_retry_count = -1;
+}
+
 void tcpc_init(void)
 {
 	pd.power_status |= TCPC_REG_POWER_STATUS_UNINIT | TCPC_REG_POWER_STATUS_VBUS_DET;
@@ -560,9 +572,15 @@ void tcpc_run(void)
 
 	if (TCPC_REG_RX_ENABLED(pd.reg_recv_detect) && (pd.internal_flags&TCPC_FLAG_TX_PENDING)) {
 		// We have a Tx request pending
+		if ((pd.alert&TCPC_REG_ALERT_RX_STATUS)||(pd.alert&TCPC_REG_ALERT_RX_HARD_RST)) {
+			tx_buf_clear();
+			// Another message received before tx is done
+			// Discard the pending tx message
+			alert(TCPC_REG_ALERT_TX_DISCARDED);
+		}
 
 		if (cur_timestamp > pd.tx_start_timestamp + 1800 || (pd.tx_retry_count == -1)) {
-			pd_prepare_message(TCPC_REG_TRANSMIT_TYPE(pd.tx_type), 1, 0);
+			pd_prepare_message(TCPC_REG_TRANSMIT_TYPE(pd.tx_type), pd.tx_len, pd.tx_payload);
 			pd_tx(0);
 			pd.tx_start_timestamp = cur_timestamp;
 

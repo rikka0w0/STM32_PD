@@ -28,6 +28,7 @@ typedef struct __pd_message {
 }pd_message;
 
 uint8_t tcpc_get_message(pd_message* msg);
+void tcpc_send_message(const pd_message* msg);
 
 enum tcpc_cc_voltage_status {
 	TYPEC_CC_VOLT_OPEN = 0,		// SRC.Open, SNK.Open

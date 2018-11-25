@@ -10,6 +10,10 @@
 uint8_t tcpm_state;
 #define PD_JUST_CONNECTED 0
 #define PD_SRC_CAP_RECVED 1
+#define PD_PWR_REQ_SENT 2
+#define PD_WAIT_FOR_ACCEPT 3
+#define PD_WAIT_FOR_PSRDY 4
+#define PD_PS_OK 5
 uint8_t tcpm_pd_state;
 uint64_t last_timestamp;
 
@@ -32,6 +36,7 @@ void tcpm_run(void) {
 				}
 			} else if (tcpm_state == TCPM_STATE_ASSERTING_CONNECTION) {
 				tcpm_state = TCPM_STATE_DISCONNECTED;
+				tcpm_pd_state = PD_JUST_CONNECTED;
 				tcpc_look4forconnection();
 			} else if (tcpm_state == TCPM_STATE_CONNECTED) {
 				tcpm_state = TCPM_STATE_ASSERTING_DISCONNECTION;
@@ -57,10 +62,19 @@ void tcpm_run(void) {
 				// Clear CC Status Flag
 				buf[0] = TCPC_REG_ALERT_RX_STATUS;
 				tcpc_i2c_write(TCPC_REG_ALERT, 1, buf);
-//
-//				if (PD_HEADER_CNT(msg.header)>0 && PD_HEADER_TYPE(msg.header) == PD_EXT_SOURCE_CAP) {
-//					tcpm_pd_state = PD_SRC_CAP_RECVED;
-//				}
+
+				if (PD_HEADER_CNT(msg.header)>0 && PD_HEADER_TYPE(msg.header) == PD_DATA_SOURCE_CAP) {
+					tcpm_pd_state = PD_SRC_CAP_RECVED;
+					last_timestamp = timestamp_get();
+				} else if (tcpm_pd_state == PD_WAIT_FOR_ACCEPT) {
+					if (PD_HEADER_CNT(msg.header)==0 && PD_HEADER_TYPE(msg.header) == PD_CTRL_ACCEPT)
+						tcpm_pd_state = PD_WAIT_FOR_PSRDY;
+				} else if (tcpm_pd_state == PD_WAIT_FOR_PSRDY) {
+					if (PD_HEADER_CNT(msg.header)==0 && PD_HEADER_TYPE(msg.header) == PD_CTRL_PS_RDY) {
+						tcpm_pd_state = PD_PS_OK;
+						uart_puts("PS ready!\n");
+					}
+				}
 			}
 		} else if (buf[0] & TCPC_REG_ALERT_RX_HARD_RST) {
 			if (tcpm_state == TCPM_STATE_CONNECTED) {
@@ -71,6 +85,14 @@ void tcpm_run(void) {
 				// Clear CC Status Flag
 				buf[0] = TCPC_REG_ALERT_RX_HARD_RST;
 				tcpc_i2c_write(TCPC_REG_ALERT, 1, buf);
+			}
+		} else if (buf[0] & TCPC_REG_ALERT_TX_SUCCESS) {
+			// Clear CC Status Flag
+			buf[0] = TCPC_REG_ALERT_TX_SUCCESS;
+			tcpc_i2c_write(TCPC_REG_ALERT, 1, buf);
+
+			if (tcpm_state == TCPM_STATE_CONNECTED && tcpm_pd_state == PD_PWR_REQ_SENT) {
+				tcpm_pd_state = PD_WAIT_FOR_ACCEPT;
 			}
 		}
 	}
@@ -100,7 +122,22 @@ void tcpm_run(void) {
 			uart_puts("TCPM_STATE_DISCONNECTED\n");
 		}
 	} else if (tcpm_state == TCPM_STATE_CONNECTED) {
+		if (tcpm_pd_state == PD_SRC_CAP_RECVED && timestamp_get() > last_timestamp + 1000) {
+			tcpm_pd_state = PD_PWR_REQ_SENT;
 
+			pd_message msg;
+			msg.frame_type = 0;
+			msg.header = PD_HEADER(
+					PD_DATA_REQUEST,
+					0,
+					0,
+					0,	//ID
+					1,
+					1,
+					0);	// 0x1042
+			msg.payload[0] = 0x430320C8;
+			tcpc_send_message(&msg);
+		}
 	}
 }
 
