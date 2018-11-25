@@ -32,6 +32,12 @@
 #define PD_RX_THRESHOLD 30	// @ 12 MHz Timer rate
 
 enum pd_rx_sop_types {	// negative value indicates error
+	PD_RX_SOP_DBGPP_GOODCRC = 12,
+	PD_RX_SOP_DBGP_GOODCRC = 11,
+	PD_RX_SOPPP_GOODCRC = 10,
+	PD_RX_SOPP_GOODCRC = 9,
+	PD_RX_SOP_GOODCRC = 8,
+
 	PD_RX_ERR_CABLE_RESET = 6,
 	PD_RX_ERR_HARD_RESET = 5,
 	PD_RX_SOP_DBGPP = 4,

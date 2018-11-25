@@ -728,6 +728,7 @@ void pd_rx_isr_handler(void) {
 
 				// Copy received data to buffer
 				copy_msg();
+				rx_sop_type += PD_RX_SOP_GOODCRC;
 			} else {
 				// Received other GoodCRC
 				header = tcpc_phy_get_goodcrc_header(
@@ -789,7 +790,7 @@ uint8_t pd_phy_is_txing(void) {
 char pd_tx(uint8_t send_goodcrc) {
 	pd_rx_disable_monitoring();
 
-	if (pd_rx_started())
+	if (pd_rx_started() || tx_goingon)
 		return -1;
 
 	// 0xFF - Monitor for incoming GoodCRC after transmission
@@ -869,10 +870,12 @@ void pd_tx_isr_handler(void) {
 	__HAL_RCC_SPI1_FORCE_RESET();
 	__HAL_RCC_SPI1_RELEASE_RESET();
 
+	__asm__ __volatile__("cpsid i");
 	if (tx_goingon == 0xFF)
 		pd_rx_enable_monitoring();
 
 	tx_goingon = 0;
+	__asm__ __volatile__("cpsie i");
 }
 
 void pd_write_preamble(void) {

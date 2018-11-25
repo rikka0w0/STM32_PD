@@ -43,7 +43,7 @@ static struct pd_port_controller {
 
 	/* Next transmit */
 	enum tcpm_transmit_type tx_type;
-	uint8_t tx_retry_count;
+	int8_t tx_retry_count;
 	uint8_t tx_len;
 	uint8_t tx_payload[30];
 	uint64_t tx_start_timestamp;
@@ -255,7 +255,7 @@ void tcpc_i2c_write(uint8_t reg, uint32_t len, const uint8_t *payload)
 		pd.tx_type = TCPC_REG_TRANSMIT_TYPE(payload[0]);
 
 		pd.internal_flags |= TCPC_FLAG_TX_PENDING;
-		pd.tx_retry_count = 0;
+		pd.tx_retry_count = -1;
 		break;
 	case TCPC_REG_TRANSMIT_BUFFER:
 		pd.tx_len = payload[0];
@@ -443,15 +443,24 @@ uint16_t tcpc_phy_get_goodcrc_header(uint8_t rx_result, uint8_t id) {
 	}
 }
 
-static inline uint8_t check_goodcrc(void) {
+static inline uint8_t check_goodcrc(uint8_t frame_type) {
 	uint16_t goodcrc_header = pd_phy_get_rx_msg(0);
 	uint16_t sent_header = pd.tx_payload[0];
 	sent_header |= ((uint16_t)pd.tx_payload[1]) << 8;
 
-	return (goodcrc_header == TCPC_REG_TRANSMIT_TYPE(pd.tx_type) &&
-		PD_HEADER_CNT(goodcrc_header) == 0 &&
-		PD_HEADER_TYPE(goodcrc_header) == PD_CTRL_GOOD_CRC &&
-		PD_HEADER_ID(goodcrc_header) == PD_HEADER_ID(sent_header)) ? 1 : 0;
+	return (
+			frame_type == pd.tx_type &&
+			PD_HEADER_TYPE(goodcrc_header) == PD_CTRL_GOOD_CRC &&
+			PD_HEADER_CNT(goodcrc_header) == 0 &&
+			PD_HEADER_ID(goodcrc_header) == PD_HEADER_ID(sent_header)
+		) ? 1 : 0;
+}
+
+static inline void tx_buf_clear(void) {
+	for (pd.tx_len = 0; pd.tx_len < sizeof(pd.tx_payload); pd.tx_len++)
+		pd.tx_payload[pd.tx_len] = 0;
+	pd.tx_len = 0;
+	pd.internal_flags &=~ TCPC_FLAG_TX_PENDING;
 }
 
 static inline void rx_buf_put(uint8_t frame_type) {
@@ -479,13 +488,13 @@ void tcpc_run(void)
 		phy_rx_result = pd_phy_get_rx_type();
 		if (phy_rx_result != PD_RX_IDLE) {
 			if (phy_rx_result >= PD_RX_SOP && phy_rx_result <= PD_RX_ERR_CABLE_RESET) {
-				if (pd.internal_flags&TCPC_FLAG_TX_PENDING) {
-					// TX, waiting for GoodCRC
-
-					if (check_goodcrc()) {
-						pd.internal_flags &=~ TCPC_FLAG_TX_PENDING;
+				if (pd.reg_recv_detect&(1<<phy_rx_result)) {
+					if (pd.internal_flags&TCPC_FLAG_TX_PENDING) {
+						tx_buf_clear();
+						// Another message received before tx is done
+						// Discard the pending tx message
+						alert(TCPC_REG_ALERT_TX_DISCARDED);
 					}
-				} else if (pd.reg_recv_detect&(1<<phy_rx_result)) {
 					/*
 					 * If there is space in buffer, then increment head to keep
 					 * the message and send goodCRC. If this is a hard reset,
@@ -502,31 +511,21 @@ void tcpc_run(void)
 
 						alert(TCPC_REG_ALERT_RX_STATUS);
 					}
-				}
+				} // if (pd.reg_recv_detect&(1<<phy_rx_result)) {
 			} else if (phy_rx_result == PD_RX_ERR_OVERRUN) {
 				alert(TCPC_REG_ALERT_RX_STATUS);
+			} else if (phy_rx_result >= PD_RX_SOP_GOODCRC && phy_rx_result <= PD_RX_SOP_DBGPP_GOODCRC &&
+					(pd.internal_flags&TCPC_FLAG_TX_PENDING) ) {
+				// TX, Received GoodCRC
+
+				if (check_goodcrc(phy_rx_result - PD_RX_SOP_GOODCRC)) {
+					tx_buf_clear();
+					alert(TCPC_REG_ALERT_TX_SUCCESS);
+				}
 			}
 
 			pd_phy_clear_rx_type();
-		}
-
-		if (pd.internal_flags&TCPC_FLAG_TX_PENDING) {
-			// We have a Tx request pending
-
-			if (pd.tx_retry_count == 0) {
-				pd.tx_retry_count++;
-
-				pd_prepare_message(TCPC_REG_TRANSMIT_TYPE(pd.tx_type), 1, 0);
-				pd_tx(0);
-				pd.tx_start_timestamp = cur_timestamp;
-			}
-
-			if (pd.tx_retry_count > PD_RETRY_COUNT) {
-				// Transmission retry failed
-
-				pd.internal_flags &=~ TCPC_FLAG_TX_PENDING;
-			}
-		}
+		} // if (phy_rx_result != PD_RX_IDLE) {
 
 		if (!pd_phy_is_txing())
 			pd_rx_enable_monitoring();
@@ -559,10 +558,24 @@ void tcpc_run(void)
 		}
 	}
 
+	if (TCPC_REG_RX_ENABLED(pd.reg_recv_detect) && (pd.internal_flags&TCPC_FLAG_TX_PENDING)) {
+		// We have a Tx request pending
 
-	// Check CC lines every 1mS
-	if (cur_timestamp > pd.cc_last_sampled_timestamp + 1000)
-	{
+		if (cur_timestamp > pd.tx_start_timestamp + 1800 || (pd.tx_retry_count == -1)) {
+			pd_prepare_message(TCPC_REG_TRANSMIT_TYPE(pd.tx_type), 1, 0);
+			pd_tx(0);
+			pd.tx_start_timestamp = cur_timestamp;
+
+			pd.tx_retry_count++;
+			if (pd.tx_retry_count >= PD_RETRY_COUNT) {
+				// Transmission retry failed
+				tx_buf_clear();
+				alert(TCPC_REG_ALERT_TX_FAILED);
+			}
+		}
+
+	} else if (cur_timestamp > pd.cc_last_sampled_timestamp + 1000) {
+		// Check CC lines every 1mS
 		pd.cc_last_sampled_timestamp = cur_timestamp;
 
 		// Check CC lines
