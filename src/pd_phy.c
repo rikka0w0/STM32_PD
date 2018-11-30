@@ -71,12 +71,24 @@ static int rx_edge_ts_idx;
 		^ (x &  8 ? 0x040 : 0x3C0) \
 		^ (x & 16 ? 0x100 : 0x300))
 
+#ifdef PD_PHY_DETECT_ALL_SOP
 static const uint16_t bmcsop[] = {
 	BMC(PD_SYNC1), BMC(PD_SYNC1), BMC(PD_SYNC1), BMC(PD_SYNC2),	// SOP
 	BMC(PD_SYNC1), BMC(PD_SYNC1), BMC(PD_SYNC3), BMC(PD_SYNC3),	// SOPP
 	BMC(PD_SYNC1), BMC(PD_SYNC3), BMC(PD_SYNC1), BMC(PD_SYNC3),	// SOPPP
 	BMC(PD_SYNC1), BMC(PD_RST2), BMC(PD_RST2), BMC(PD_SYNC3),	// SOP_DBGP
 	BMC(PD_SYNC1), BMC(PD_RST2), BMC(PD_SYNC3), BMC(PD_SYNC2)	// SOP_DBGPP
+};
+#endif	// #ifdef PD_PHY_DETECT_ALL_SOP
+
+enum pd_rx_special_4b5b {
+	TABLE_5b4b_SYNC1 = 16,
+	TABLE_5b4b_SYNC2 = 17,
+	TABLE_5b4b_RST1 = 18,
+	TABLE_5b4b_RST2 = 19,
+	TABLE_5b4b_EOP = 20,
+	TABLE_5b4b_SYNC3 = 21,
+	TABLE_5b4b_ERR = 22
 };
 
 /* 4b/5b + Bimark Phase encoding */
@@ -99,8 +111,8 @@ static const uint16_t bmc4b5b[] = {
 /* F = 1111 */ BMC(0x1D) /* 11101 */,
 /* Sync-1   */ BMC(PD_SYNC1) /* 11000 Startsynch #1 */,
 /* Sync-2   */ BMC(PD_SYNC2) /* 10001 Startsynch #2 */,
-/* RST-1    */ BMC(PD_RST1) /* 00111 Hard Reset #1 */,
-/* RST-2    */ BMC(PD_RST2) /* 11001 Hard Reset #2 */,
+/* RST-1    */ BMC(PD_RST1) /* 00111 Reset #1 */,
+/* RST-2    */ BMC(PD_RST2) /* 11001 Reset #2 */,
 /* EOP      */ BMC(PD_EOP) /* 01101 EOP End Of Packet */,
 /* Reserved    Error        00000 */
 /* Reserved    Error        00001 */
@@ -786,6 +798,9 @@ uint8_t pd_phy_is_txing(void) {
 
 /**
  * Transmit an encoded PD message to the active cc line. Return negative if something goes wrong.
+ * send_goodcrc should be 1 when send GoodCRC in respond to incoming message, in this case,
+ * rx monitoring is not enabled immediately. send_goodcrc should be 0 so that rx monitoring is
+ * resumed immediately after message transmission.
  */
 char pd_tx(uint8_t send_goodcrc) {
 	pd_rx_disable_monitoring();
@@ -883,9 +898,9 @@ void pd_write_preamble(void) {
 
 	/* 64-bit x2 preamble */
 	msg[0] = 0xB4B4B4B4;	// Alternating bit sequence used for packet preamble
-	msg[1] = 0xB4B4B4B4;	// 00 10 11 01 00 ..
-	msg[2] = 0xB4B4B4B4;	// Starts with 0, ends with 1
-	msg[3] = 0xB4B4B4B4;
+	msg[1] = msg[0];		// 00 10 11 01 00 ..
+	msg[2] = msg[0];		// Starts with 0, ends with 1
+	msg[3] = msg[0];
 	b_toggle = 0x3FF; /* preamble ends with 1 */
 	raw_ptr = 2*64;
 }
@@ -973,5 +988,26 @@ void pd_prepare_message(uint8_t sop_type, uint8_t cnt, const uint8_t* data) {
 
 	pd_write_sym(BMC(PD_EOP));
 
+	pd_write_last_edge();
+}
+
+void pd_prepare_reset(uint8_t hard_rest)
+{
+	pd_write_preamble();
+
+	if (hard_rest) {
+		/* Hard-Reset: 3x RST-1 + 1x RST-2 */
+		pd_write_sym(bmc4b5b[TABLE_5b4b_RST1]);
+		pd_write_sym(bmc4b5b[TABLE_5b4b_RST1]);
+		pd_write_sym(bmc4b5b[TABLE_5b4b_RST1]);
+		pd_write_sym(bmc4b5b[TABLE_5b4b_RST2]);
+	} else {
+		/* Cable-Reset: RST-1, Sync-1, RST-1, Sync-3 */
+		pd_write_sym(bmc4b5b[TABLE_5b4b_RST1]);
+		pd_write_sym(bmc4b5b[TABLE_5b4b_SYNC1]);
+		pd_write_sym(bmc4b5b[TABLE_5b4b_RST1]);
+		pd_write_sym(bmc4b5b[TABLE_5b4b_SYNC3]);
+	}
+	/* Ensure that we have a final edge */
 	pd_write_last_edge();
 }

@@ -104,7 +104,8 @@ void tcpc_alert_status_clear(uint16_t mask)
 	}
 }
 
-uint8_t tcpc_get_message(pd_message* msg) {
+uint8_t tcpc_get_message(pd_message* msg)
+{
 	if (msg != 0 && pd.rx_buf_count>0) {
 		for (uint8_t i=0; i<sizeof(pd_message); i++) {
 			((uint8_t*)msg)[i] = ((uint8_t*)&pd.rx_message[pd.rx_buf_tail])[i];
@@ -114,7 +115,8 @@ uint8_t tcpc_get_message(pd_message* msg) {
 	return 0xFF;
 }
 
-void tcpc_send_message(const pd_message* msg) {
+void tcpc_send_message(const pd_message* msg)
+{
 	pd.tx_type = msg->frame_type;
 	pd.tx_len = PD_HEADER_CNT(msg->header) << 2;
 	pd.tx_payload[0] = msg->header & 0xFF;
@@ -148,7 +150,8 @@ void tcpc_init(void)
 	alert(TCPC_REG_ALERT_POWER_STATUS);
 }
 
-uint8_t tcpc_is_int_asserted() {
+uint8_t tcpc_is_int_asserted()
+{
 	return (pd.internal_flags&TCPC_FLAG_INT_ASSERTED) ? 1 : 0;
 }
 
@@ -175,7 +178,7 @@ void tcpc_look4forconnection(void)
 	}
 }
 
-static inline void tcpc_role_ctrl_change(uint8_t newval)
+void tcpc_role_ctrl_change(uint8_t newval)
 {
 	pd.internal_flags &=~ (TCPC_FLAG_LOOKING4CON | TCPC_FLAG_DRP_TOGGLE_AS_SNK | TCPC_FLAG_DRP_TOGGLE_AS_SRC);
 
@@ -239,7 +242,8 @@ void tcpc_i2c_write(uint8_t reg, uint32_t len, const uint8_t *payload)
 		tcpc_role_ctrl_change(payload[0]);
 		break;
 	case TCPC_REG_POWER_CTRL:
-		//tcpc_set_vconn(TCPC_REG_POWER_CTRL_VCONN(payload[1]));
+		pd.cc_power_ctrl = payload[0];
+		pd_set_vconn(TCPC_REG_POWER_CTRL_VCONN(pd.cc_power_ctrl), TCPC_REG_TCPC_CTRL_POLARITY(pd.cc_tcpc_ctrl));
 		break;
 
 	// Command register, write only
@@ -349,8 +353,8 @@ uint32_t tcpc_i2c_read(uint8_t reg, uint8_t *payload)
 		payload[1] = (pd.rx_message[pd.rx_buf_tail].header >> 8) & 0xff;
 		return 2;
 	case TCPC_REG_RX_DATA:
-		memcpy(payload, pd.rx_message[pd.rx_buf_tail].payload,
-		       sizeof(pd.rx_message[pd.rx_buf_tail].payload));
+		for (uint8_t i=0; i<sizeof(pd.rx_message[pd.rx_buf_tail].payload); i++)
+			payload[i] = ((uint8_t*)&(pd.rx_message[pd.rx_buf_tail].payload))[i];
 		return sizeof(pd.rx_message[pd.rx_buf_tail].payload);
 
 	default:
@@ -435,7 +439,8 @@ static inline void tcpc_detect_cc_status(uint64_t cur_timestamp)
 	}
 }
 
-uint16_t tcpc_phy_get_goodcrc_header(uint8_t rx_result, uint8_t id) {
+uint16_t tcpc_phy_get_goodcrc_header(uint8_t rx_result, uint8_t id)
+{
 	// True if the packet type is supported
 	if (pd.rx_buf_count >= RX_BUFFER_SIZE) {
 		return 0xFE;
@@ -455,7 +460,8 @@ uint16_t tcpc_phy_get_goodcrc_header(uint8_t rx_result, uint8_t id) {
 	}
 }
 
-static inline uint8_t check_goodcrc(uint8_t frame_type) {
+static inline uint8_t check_goodcrc(uint8_t frame_type)
+{
 	uint16_t goodcrc_header = pd_phy_get_rx_msg(0);
 	uint16_t sent_header = pd.tx_payload[0];
 	sent_header |= ((uint16_t)pd.tx_payload[1]) << 8;
@@ -468,14 +474,16 @@ static inline uint8_t check_goodcrc(uint8_t frame_type) {
 		) ? 1 : 0;
 }
 
-static inline void tx_buf_clear(void) {
+static inline void tx_buf_clear(void)
+{
 	for (pd.tx_len = 0; pd.tx_len < sizeof(pd.tx_payload); pd.tx_len++)
 		pd.tx_payload[pd.tx_len] = 0;
 	pd.tx_len = 0;
 	pd.internal_flags &=~ TCPC_FLAG_TX_PENDING;
 }
 
-static inline void rx_buf_put(uint8_t frame_type) {
+static inline void rx_buf_put(uint8_t frame_type)
+{
 	uint8_t rx_buf_head = pd.rx_buf_tail + pd.rx_buf_count;
 
 	if (rx_buf_head >= RX_BUFFER_SIZE)
@@ -501,10 +509,10 @@ void tcpc_run(void)
 		if (phy_rx_result != PD_RX_IDLE) {
 			if (phy_rx_result >= PD_RX_SOP && phy_rx_result <= PD_RX_ERR_CABLE_RESET) {
 				if (pd.reg_recv_detect&(1<<phy_rx_result)) {
-					if (pd.internal_flags&TCPC_FLAG_TX_PENDING) {
+					if ((pd.internal_flags&TCPC_FLAG_TX_PENDING) && (phy_rx_result==PD_RX_SOP)) {
+						// Before we transmit the pending message, a SOP message arrived
+						// Discard any message pending transmission
 						tx_buf_clear();
-						// Another message received before tx is done
-						// Discard the pending tx message
 						alert(TCPC_REG_ALERT_TX_DISCARDED);
 					}
 					/*
@@ -516,7 +524,17 @@ void tcpc_run(void)
 					 */
 
 					if (phy_rx_result == PD_RX_ERR_HARD_RESET) {
-						alert(TCPC_REG_ALERT_RX_HARD_RST);
+						if (pd.reg_recv_detect & TCPC_REG_RX_DETECT_HRST) {
+							pd.reg_recv_detect = 0;
+							alert(TCPC_REG_ALERT_RX_HARD_RST);
+						}
+					} else if (phy_rx_result == PD_RX_ERR_CABLE_RESET) {
+						if (pd.reg_recv_detect & TCPC_REG_RX_DETECT_CRST) {
+							alert(TCPC_REG_ALERT_RX_STATUS);
+
+							pd.reg_recv_detect = 0;
+							pd_rx_disable_monitoring();
+						}
 					} else if (pd.rx_buf_count < RX_BUFFER_SIZE){
 						// Buffer is not full
 						rx_buf_put(phy_rx_result);
@@ -571,15 +589,28 @@ void tcpc_run(void)
 	}
 
 	if (TCPC_REG_RX_ENABLED(pd.reg_recv_detect) && (pd.internal_flags&TCPC_FLAG_TX_PENDING)) {
-		// We have a Tx request pending
+		// We have an unread received message
 		if ((pd.alert&TCPC_REG_ALERT_RX_STATUS)||(pd.alert&TCPC_REG_ALERT_RX_HARD_RST)) {
 			tx_buf_clear();
 			// Another message received before tx is done
 			// Discard the pending tx message
 			alert(TCPC_REG_ALERT_TX_DISCARDED);
-		}
+		} else if (pd.tx_type == TCPC_TX_HARD_RESET) {
+			// Request to send a hard-reset
+			pd_prepare_reset(1);
+			pd_tx(0);
+			tx_buf_clear();	// No retry
+			alert(TCPC_REG_ALERT_TX_SUCCESS|TCPC_REG_ALERT_TX_FAILED);
 
-		if (cur_timestamp > pd.tx_start_timestamp + 1800 || (pd.tx_retry_count == -1)) {
+			// Clear RECEIVE_DETECT, disable monitoring
+			pd.reg_recv_detect = 0;
+			pd_rx_disable_monitoring();
+		} else if (pd.tx_type == TCPC_TX_CABLE_RESET) {
+			pd_prepare_reset(0);
+			pd_tx(0);
+			tx_buf_clear(); // No retry
+			alert(TCPC_REG_ALERT_TX_SUCCESS);
+		} else if (cur_timestamp > pd.tx_start_timestamp + 1800 || (pd.tx_retry_count == -1)) {
 			pd_prepare_message(TCPC_REG_TRANSMIT_TYPE(pd.tx_type), pd.tx_len, pd.tx_payload);
 			pd_tx(0);
 			pd.tx_start_timestamp = cur_timestamp;
@@ -591,7 +622,6 @@ void tcpc_run(void)
 				alert(TCPC_REG_ALERT_TX_FAILED);
 			}
 		}
-
 	} else if (cur_timestamp > pd.cc_last_sampled_timestamp + 1000) {
 		// Check CC lines every 1mS
 		pd.cc_last_sampled_timestamp = cur_timestamp;

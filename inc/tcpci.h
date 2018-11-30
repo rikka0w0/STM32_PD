@@ -16,8 +16,9 @@ void tcpc_i2c_write(uint8_t reg, uint32_t len, const uint8_t *payload);
 
 // The following can be called by TCPM if TCPM is on the same CPU and same task
 uint8_t tcpc_is_int_asserted(void);
-void tcpc_alert_status_clear(uint16_t mask);
-void tcpc_look4forconnection(void);
+void tcpc_alert_status_clear(uint16_t mask);	// Write 1 to alter register to clear flags
+void tcpc_role_ctrl_change(uint8_t newval);		// Write role control register
+void tcpc_look4forconnection(void);				// Write Look4Connection to command register
 
 typedef struct __pd_message {
 	// RECEIVE_BYTE_COUNT is calculated from rx_header
@@ -34,8 +35,8 @@ enum tcpc_cc_voltage_status {
 	TYPEC_CC_VOLT_OPEN = 0,		// SRC.Open, SNK.Open
 	TYPEC_CC_VOLT_RA = 1,		// SRC.Ra
 	TYPEC_CC_VOLT_RD = 2,		// SRC.Rd
-	TYPEC_CC_VOLT_SNK_DEF = 5,	// SNK.Rp
 	TYPEC_CC_VOLT_SNK_1_5 = 6,	// SNK.Rp
+	TYPEC_CC_VOLT_SNK_DEF = 5,	// SNK.Rp
 	TYPEC_CC_VOLT_SNK_3_0 = 7,	// SNK.Rp
 };
 

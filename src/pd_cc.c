@@ -207,12 +207,6 @@ void pd_cc_rprp_init(void)
 #endif // PD_CFG_RD_CTRL
 }
 
-#define PD_CFG_VCONN_CTRL	// Enable Vconn control			PF0, PF1
-#define PD_CFG_RP_3A0		// Enable 5V3A Rp (4.7k)		PB5, PA3
-#define PD_CFG_RP_1A5		// Enable 5V1.5A Rp (12k)		PA11, PA12
-#define PD_CFG_RP_DEF		// Enable 5V0.5A Rp (36k)		PA9, PA10
-#define PD_CFG_RD_CTRL		// Enable Rd (5.1k) control		PB3, PA15
-
 void pd_cc_set(uint8_t role_ctrl_regval)
 {
 	// Disable Rp and Rd
@@ -285,4 +279,25 @@ void pd_cc_set(uint8_t role_ctrl_regval)
 		PD_CC2_RD_EN();	// Rd and Ra can not coexist, remove Rd and install Ra if you need
 #endif
 	}
+}
+
+void pd_set_vconn(uint8_t enabled, uint8_t orientation)
+{
+#ifdef PD_CFG_VCONN_CTRL
+	if (!enabled) {
+		// If ((POWER_CONTROL.EnableVconn=0)
+		PD_CC1_VCONN_DIS();
+		PD_CC2_VCONN_DIS();
+	} else if (orientation){
+		// If ((POWER_CONTROL.EnableVconn=1 and TCPC_CONTROL.PlugOrientation=1))
+		// Apply Vconn to CC1, Monitor BMC on CC2
+		PD_CC2_VCONN_DIS();
+		PD_CC1_VCONN_EN();
+	} else {
+		// If ((POWER_CONTROL.EnableVconn=1 and TCPC_CONTROL.PlugOrientation=0))
+		// Apply Vconn to CC2, Monitor BMC on CC1
+		PD_CC1_VCONN_DIS();
+		PD_CC2_VCONN_EN();
+	}
+#endif
 }

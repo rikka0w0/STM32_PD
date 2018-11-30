@@ -54,16 +54,6 @@ enum pd_rx_sop_types {	// negative value indicates error
 	PD_RX_ERR_OVERRUN = 0xFA		// A message arrived before the TCPC copies the old message from phy
 };
 
-enum pd_rx_special_4b5b {
-	TABLE_5b4b_SYNC1 = 16,
-	TABLE_5b4b_SYNC2 = 17,
-	TABLE_5b4b_RST1 = 18,
-	TABLE_5b4b_RST2 = 19,
-	TABLE_5b4b_EOP = 20,
-	TABLE_5b4b_SYNC3 = 21,
-	TABLE_5b4b_ERR = 22
-};
-
 void pd_init(void);
 void pd_select_cc(uint8_t cc);
 
@@ -79,9 +69,11 @@ uint16_t tcpc_phy_get_goodcrc_header(uint8_t rx_result, uint8_t id);	// Used by 
 
 char pd_tx(uint8_t send_goodcrc);
 void pd_prepare_message(uint8_t sop_type, uint8_t cnt, const uint8_t* data);
+void pd_prepare_reset(uint8_t hard_rest);
 
 // CC Rp/Rd & Vconn control
 void pd_cc_rprp_init(void);
 uint8_t pd_cc_read_status(uint8_t cc, uint8_t resistor, uint8_t rp);
 void pd_cc_set(uint8_t role_ctrl_regval);
+void pd_set_vconn(uint8_t enabled, uint8_t orientation);
 #endif // __PD_PHY_H
