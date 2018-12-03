@@ -315,7 +315,7 @@ void pd_init(void) {
 	rx_sop_type = PD_RX_IDLE;
 	pd_select_cc(PD_CC_NC);
 
-	pd_rx_disable_monitoring();
+	pd_phy_rx_disable_monitoring();
 
 	/* EXTI interrupt init*/
 	HAL_NVIC_SetPriority(PD_COMP_EXTI, 1, 0);
@@ -367,26 +367,26 @@ void pd_init(void) {
     pd_tx_prepare_cc(0);
 }
 
-void pd_rx_enable_monitoring(void) {
+void pd_phy_rx_enable_monitoring(void) {
 	/* clear comparator external interrupt */
 	EXTI->PR = PD_COMP_MASK;		// Pending register
 	/* enable comparator external interrupt */
 	EXTI->IMR |= PD_COMP_MASK;
 }
 
-void pd_rx_disable_monitoring(void) {
+void pd_phy_rx_disable_monitoring(void) {
 	/* disable comparator external interrupt */
 	EXTI->IMR &= ~ PD_COMP_MASK;
 	/* clear comparator external interrupt */
 	EXTI->PR = PD_COMP_MASK;
 }
 
-uint32_t pd_rx_started(void) {
+uint32_t pd_phy_rx_started(void) {
 	/* is the sampling timer running ? */
 	return TIM3->CR1 & 1;	// RM0091 436, CEN == 1 ??
 }
 
-void pd_rx_complete() {
+void pd_phy_rx_complete() {
 	/* stop stampling TIM2 */
 	TIM3->CR1 &= ~1; // CEN = 0;
 	TIM3->DIER = 0; // Disable any possible interrupt / DMA request
@@ -394,7 +394,7 @@ void pd_rx_complete() {
 	PD_RX_DMA_CHANNEL->CCR = 0;
 }
 
-void pd_rx_start() {
+void pd_phy_rx_start() {
 	raw_samples = (uint8_t*) raw_samples_buf;
 	rx_bytes = (uint8_t*) raw_samples_buf - 32;
 
@@ -433,7 +433,7 @@ void pd_rx_start() {
 	TIM3->CR1 |= 1; // Enable Timer
 }
 
-static inline uint8_t pd_find_preamble(void) {
+static inline uint8_t find_preamble(void) {
 	raw_ptr = 2; 	// DMA1_CH3, TIM3_CH4
 
 	uint32_t all = 0;
@@ -609,7 +609,7 @@ static inline uint8_t pd_rx_decode_byte(void) {
 }
 
 static inline uint8_t pd_rx_process(void) {
-	uint8_t sop = pd_find_preamble();
+	uint8_t sop = find_preamble();
 	if (sop == PD_RX_SOP) {
 #ifdef PD_PHY_DETECT_ALL_SOP
 		uint8_t kcode1 = pd_rx_decode_byte();
@@ -724,15 +724,15 @@ void pd_rx_isr_handler(void) {
 			 * ignore the comparator IRQ until we are done
 			 * with current message
 			 */
-			pd_rx_disable_monitoring();
+			pd_phy_rx_disable_monitoring();
 
 			/* start sampling */
-			pd_rx_start();
+			pd_phy_rx_start();
 
 			/* trigger the analysis in the task */
 			rx_sop_type = pd_rx_process();
 
-			pd_rx_complete();	// Ignore EOP
+			pd_phy_rx_complete();	// Ignore EOP
 
 			uint16_t header = *((uint16_t*)raw_samples);
 			if (PD_HEADER_CNT(header) == 0 && PD_HEADER_TYPE(header) == PD_CTRL_GOOD_CRC) {
@@ -803,9 +803,9 @@ uint8_t pd_phy_is_txing(void) {
  * resumed immediately after message transmission.
  */
 char pd_tx(uint8_t send_goodcrc) {
-	pd_rx_disable_monitoring();
+	pd_phy_rx_disable_monitoring();
 
-	if (pd_rx_started() || tx_goingon)
+	if (pd_phy_rx_started() || tx_goingon)
 		return -1;
 
 	// 0xFF - Monitor for incoming GoodCRC after transmission
@@ -887,13 +887,13 @@ void pd_tx_isr_handler(void) {
 
 	__asm__ __volatile__("cpsid i");
 	if (tx_goingon == 0xFF)
-		pd_rx_enable_monitoring();
+		pd_phy_rx_enable_monitoring();
 
 	tx_goingon = 0;
 	__asm__ __volatile__("cpsie i");
 }
 
-void pd_write_preamble(void) {
+static void write_preamble(void) {
 	uint32_t *msg = raw_samples_buf;
 
 	/* 64-bit x2 preamble */
@@ -905,7 +905,7 @@ void pd_write_preamble(void) {
 	raw_ptr = 2*64;
 }
 
-void pd_write_sym(uint32_t val10) {
+static void write_sym(uint32_t val10) {
 	uint32_t *msg = raw_samples_buf;
 	int word_idx = raw_ptr / 32;
 	int bit_idx = raw_ptr % 32;
@@ -923,7 +923,7 @@ void pd_write_sym(uint32_t val10) {
 	raw_ptr += 5*2;
 }
 
-void pd_write_last_edge(void) {
+static void write_last_edge(void) {
 	uint32_t *msg = raw_samples_buf;
 	int word_idx = raw_ptr / 32;
 	int bit_idx = raw_ptr % 32;
@@ -955,59 +955,59 @@ void pd_write_last_edge(void) {
 void pd_prepare_message(uint8_t sop_type, uint8_t cnt, const uint8_t* data) {
 	uint8_t i;
 
-	pd_write_preamble();
+	write_preamble();
 
 #ifdef PD_PHY_DETECT_ALL_SOP
 	// Write SOP
 	for (i = 0; i < 4; i++)
-		pd_write_sym(bmcsop[i+(sop_type<<2)]);
+		write_sym(bmcsop[i+(sop_type<<2)]);
 #else
-	pd_write_sym(bmc4b5b[TABLE_5b4b_SYNC1]);
-	pd_write_sym(bmc4b5b[TABLE_5b4b_SYNC1]);
-	pd_write_sym(bmc4b5b[TABLE_5b4b_SYNC1]);
-	pd_write_sym(bmc4b5b[TABLE_5b4b_SYNC2]);
+	write_sym(bmc4b5b[TABLE_5b4b_SYNC1]);
+	write_sym(bmc4b5b[TABLE_5b4b_SYNC1]);
+	write_sym(bmc4b5b[TABLE_5b4b_SYNC1]);
+	write_sym(bmc4b5b[TABLE_5b4b_SYNC2]);
 #endif
 
 
 	crc32_init();
 	for (i = 0; i < cnt; i++) {
-		pd_write_sym(bmc4b5b[data[i] & 0xF]);
-		pd_write_sym(bmc4b5b[(data[i] >> 4) & 0xF]);
+		write_sym(bmc4b5b[data[i] & 0xF]);
+		write_sym(bmc4b5b[(data[i] >> 4) & 0xF]);
 		crc32_hash8(data[i]);
 	}
 
 	uint32_t crc = crc32_result();
-	pd_write_sym(bmc4b5b[(crc >> 0) & 0xF]);
-	pd_write_sym(bmc4b5b[(crc >> 4) & 0xF]);
-	pd_write_sym(bmc4b5b[(crc >> 8) & 0xF]);
-	pd_write_sym(bmc4b5b[(crc >> 12) & 0xF]);
-	pd_write_sym(bmc4b5b[(crc >> 16) & 0xF]);
-	pd_write_sym(bmc4b5b[(crc >> 20) & 0xF]);
-	pd_write_sym(bmc4b5b[(crc >> 24) & 0xF]);
-	pd_write_sym(bmc4b5b[(crc >> 28) & 0xF]);
+	write_sym(bmc4b5b[(crc >> 0) & 0xF]);
+	write_sym(bmc4b5b[(crc >> 4) & 0xF]);
+	write_sym(bmc4b5b[(crc >> 8) & 0xF]);
+	write_sym(bmc4b5b[(crc >> 12) & 0xF]);
+	write_sym(bmc4b5b[(crc >> 16) & 0xF]);
+	write_sym(bmc4b5b[(crc >> 20) & 0xF]);
+	write_sym(bmc4b5b[(crc >> 24) & 0xF]);
+	write_sym(bmc4b5b[(crc >> 28) & 0xF]);
 
-	pd_write_sym(BMC(PD_EOP));
+	write_sym(BMC(PD_EOP));
 
-	pd_write_last_edge();
+	write_last_edge();
 }
 
-void pd_prepare_reset(uint8_t hard_rest)
+void pd_phy_prepare_reset(uint8_t hard_rest)
 {
-	pd_write_preamble();
+	write_preamble();
 
 	if (hard_rest) {
 		/* Hard-Reset: 3x RST-1 + 1x RST-2 */
-		pd_write_sym(bmc4b5b[TABLE_5b4b_RST1]);
-		pd_write_sym(bmc4b5b[TABLE_5b4b_RST1]);
-		pd_write_sym(bmc4b5b[TABLE_5b4b_RST1]);
-		pd_write_sym(bmc4b5b[TABLE_5b4b_RST2]);
+		write_sym(bmc4b5b[TABLE_5b4b_RST1]);
+		write_sym(bmc4b5b[TABLE_5b4b_RST1]);
+		write_sym(bmc4b5b[TABLE_5b4b_RST1]);
+		write_sym(bmc4b5b[TABLE_5b4b_RST2]);
 	} else {
 		/* Cable-Reset: RST-1, Sync-1, RST-1, Sync-3 */
-		pd_write_sym(bmc4b5b[TABLE_5b4b_RST1]);
-		pd_write_sym(bmc4b5b[TABLE_5b4b_SYNC1]);
-		pd_write_sym(bmc4b5b[TABLE_5b4b_RST1]);
-		pd_write_sym(bmc4b5b[TABLE_5b4b_SYNC3]);
+		write_sym(bmc4b5b[TABLE_5b4b_RST1]);
+		write_sym(bmc4b5b[TABLE_5b4b_SYNC1]);
+		write_sym(bmc4b5b[TABLE_5b4b_RST1]);
+		write_sym(bmc4b5b[TABLE_5b4b_SYNC3]);
 	}
 	/* Ensure that we have a final edge */
-	pd_write_last_edge();
+	write_last_edge();
 }

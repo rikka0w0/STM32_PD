@@ -57,9 +57,9 @@ enum pd_rx_sop_types {	// negative value indicates error
 void pd_init(void);
 void pd_select_cc(uint8_t cc);
 
-void pd_rx_disable_monitoring(void);
-void pd_rx_enable_monitoring(void);
-uint32_t pd_rx_started(void);
+void pd_phy_rx_disable_monitoring(void);
+void pd_phy_rx_enable_monitoring(void);
+uint32_t pd_phy_rx_started(void);
 
 uint8_t pd_phy_get_rx_type(void);
 void pd_phy_clear_rx_type(void);
@@ -69,7 +69,7 @@ uint16_t tcpc_phy_get_goodcrc_header(uint8_t rx_result, uint8_t id);	// Used by 
 
 char pd_tx(uint8_t send_goodcrc);
 void pd_prepare_message(uint8_t sop_type, uint8_t cnt, const uint8_t* data);
-void pd_prepare_reset(uint8_t hard_rest);
+void pd_phy_prepare_reset(uint8_t hard_rest);
 
 // CC Rp/Rd & Vconn control
 void pd_cc_rprp_init(void);

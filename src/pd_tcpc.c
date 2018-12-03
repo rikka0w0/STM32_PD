@@ -261,7 +261,7 @@ void tcpc_i2c_write(uint8_t reg, uint32_t len, const uint8_t *payload)
 		pd.reg_recv_detect = payload[0];
 
 		if (!TCPC_REG_RX_ENABLED(pd.reg_recv_detect))
-			pd_rx_disable_monitoring();
+			pd_phy_rx_disable_monitoring();
 
 		break;
 
@@ -535,7 +535,7 @@ void tcpc_run(void)
 							alert(TCPC_REG_ALERT_RX_STATUS);
 
 							pd.reg_recv_detect = 0;
-							pd_rx_disable_monitoring();
+							pd_phy_rx_disable_monitoring();
 						}
 					} else if (pd.rx_buf_count < RX_BUFFER_SIZE){
 						// Buffer is not full
@@ -560,7 +560,7 @@ void tcpc_run(void)
 		} // if (phy_rx_result != PD_RX_IDLE) {
 
 		if (!pd_phy_is_txing())
-			pd_rx_enable_monitoring();
+			pd_phy_rx_enable_monitoring();
 		__asm__ __volatile__("cpsie i");
 	}
 
@@ -599,16 +599,16 @@ void tcpc_run(void)
 			alert(TCPC_REG_ALERT_TX_DISCARDED);
 		} else if (pd.tx_type == TCPC_TX_HARD_RESET) {
 			// Request to send a hard-reset
-			pd_prepare_reset(1);
+			pd_phy_prepare_reset(1);
 			pd_tx(0);
 			tx_buf_clear();	// No retry
 			alert(TCPC_REG_ALERT_TX_SUCCESS|TCPC_REG_ALERT_TX_FAILED);
 
 			// Clear RECEIVE_DETECT, disable monitoring
 			pd.reg_recv_detect = 0;
-			pd_rx_disable_monitoring();
+			pd_phy_rx_disable_monitoring();
 		} else if (pd.tx_type == TCPC_TX_CABLE_RESET) {
-			pd_prepare_reset(0);
+			pd_phy_prepare_reset(0);
 			pd_tx(0);
 			tx_buf_clear(); // No retry
 			alert(TCPC_REG_ALERT_TX_SUCCESS);

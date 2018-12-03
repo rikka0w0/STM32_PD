@@ -119,6 +119,8 @@ void tcpm_run(void) {
 	} else if (tcpm_state == TCPM_STATE_ASSERTING_DISCONNECTION) {
 		if (timestamp_get() > last_timestamp + 50000) {	// 50ms debouncing
 			tcpm_state = TCPM_STATE_DISCONNECTED;
+			buf[0] = 0;
+			tcpc_i2c_write(TCPC_REG_RX_DETECT, 1, buf);
 			uart_puts("TCPM_STATE_DISCONNECTED\n");
 		}
 	} else if (tcpm_state == TCPM_STATE_CONNECTED) {
