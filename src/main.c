@@ -1,7 +1,7 @@
 #include <error_handler.h>
-#include "pd_phy.h"
 #include "platform.h"
 #include "tcpci.h"
+#include "pd.h"
 
 #define TCPM_STATE_DISCONNECTED 0
 #define TCPM_STATE_ASSERTING_CONNECTION 1
@@ -140,11 +140,12 @@ void tcpm_run(void) {
 		}
 	}
 }
-
+extern void pd_protocol_run(); extern void pd_protocol_init();
 int main(void) {
 	hw_init();
 
 	tcpc_init();
+	//pd_protocol_init();
 
 	uint8_t cmd[8];
 
@@ -162,5 +163,6 @@ int main(void) {
 	while (1)  {
 		tcpc_run();
 		tcpm_run();
+		//pd_protocol_run();
 	}
 }

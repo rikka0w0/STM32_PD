@@ -1,6 +1,6 @@
 #include "platform.h"
 #include "pd_phy.h"
-#include "pd.h"
+#include "pd.h"	// for GoodCRC and headers
 
 // Configuration Start ---------------------------------------------------
 #define PD_PHY_DETECT_ALL_SOP

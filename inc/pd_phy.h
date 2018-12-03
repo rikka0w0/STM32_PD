@@ -37,7 +37,7 @@ enum pd_rx_sop_types {	// negative value indicates error
 	PD_RX_SOPPP_GOODCRC = 10,
 	PD_RX_SOPP_GOODCRC = 9,
 	PD_RX_SOP_GOODCRC = 8,
-
+	// following has to match enum tcpm_transmit_type
 	PD_RX_ERR_CABLE_RESET = 6,
 	PD_RX_ERR_HARD_RESET = 5,
 	PD_RX_SOP_DBGPP = 4,

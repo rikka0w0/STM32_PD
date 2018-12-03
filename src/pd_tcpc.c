@@ -1,6 +1,7 @@
 #include "platform.h"
 #include "pd_phy.h"
 #include "tcpci.h"
+#include "pd.h"	// for GoodCRC and headers
 
 #define TCPC_TIMER_TOGGLE_SNK 60000
 #define TCPC_TIMER_TOGGLE_SRC 60000
@@ -44,7 +45,6 @@ static struct pd_port_controller {
 	/* Next transmit */
 	enum tcpm_transmit_type tx_type;
 	int8_t tx_retry_count;
-	uint8_t tx_len;
 	uint8_t tx_payload[30];
 	uint64_t tx_start_timestamp;
 
@@ -55,6 +55,7 @@ static struct pd_port_controller {
 	uint64_t cc_last_sampled_timestamp;
 } pd;
 
+#define TX_LEN(header) (2+(PD_HEADER_CNT(header)<<2))	// 2-byte header + 4-byte payloads
 
 static void alert(uint16_t mask)
 {
@@ -65,9 +66,8 @@ static void alert(uint16_t mask)
 	 * bit in the alert_enable register is set.
 	 */
 	if (pd.alert_mask & mask) {
-		__asm__ __volatile__("cpsid i");
 		pd.internal_flags |= TCPC_FLAG_INT_ASSERTED;
-		__asm__ __volatile__("cpsie i");
+		// tcpc_alert();
 	}
 }
 
@@ -118,12 +118,11 @@ uint8_t tcpc_get_message(pd_message* msg)
 void tcpc_send_message(const pd_message* msg)
 {
 	pd.tx_type = msg->frame_type;
-	pd.tx_len = PD_HEADER_CNT(msg->header) << 2;
+	uint8_t cnt = PD_HEADER_CNT(msg->header) << 2;
 	pd.tx_payload[0] = msg->header & 0xFF;
 	pd.tx_payload[1] = (msg->header >> 8) & 0xFF;
-	for (uint8_t i=0; i<pd.tx_len; i++)
+	for (uint8_t i=0; i<cnt; i++)
 		pd.tx_payload[i+2] = ((uint8_t*)&msg->payload)[i];
-	pd.tx_len += 2;
 	pd.internal_flags |= TCPC_FLAG_TX_PENDING;
 	pd.tx_retry_count = -1;
 }
@@ -273,12 +272,16 @@ void tcpc_i2c_write(uint8_t reg, uint32_t len, const uint8_t *payload)
 		pd.internal_flags |= TCPC_FLAG_TX_PENDING;
 		pd.tx_retry_count = -1;
 		break;
-	case TCPC_REG_TRANSMIT_BUFFER:
-		pd.tx_len = payload[0];
-
-		for (uint8_t i=0; i<pd.tx_len; i++)
-			pd.tx_payload[i] = payload[i+1];
-
+	case TCPC_REG_TX_BYTE_CNT:
+		// tx_len = 2 + HEADER.COUNT * 4
+		break;
+	case TCPC_REG_TX_HDR:
+		pd.tx_payload[0] = payload[0];
+		pd.tx_payload[1] = (payload[1] << 8);
+		break;
+	case TCPC_REG_TX_DATA:
+		for (uint8_t i=0; i<len; i++)
+			pd.tx_payload[i+2] = payload[i];
 		break;
 	}
 }
@@ -476,9 +479,8 @@ static inline uint8_t check_goodcrc(uint8_t frame_type)
 
 static inline void tx_buf_clear(void)
 {
-	for (pd.tx_len = 0; pd.tx_len < sizeof(pd.tx_payload); pd.tx_len++)
-		pd.tx_payload[pd.tx_len] = 0;
-	pd.tx_len = 0;
+	for (uint8_t i = 0; i < sizeof(pd.tx_payload); i++)
+		pd.tx_payload[i] = 0;
 	pd.internal_flags &=~ TCPC_FLAG_TX_PENDING;
 }
 
@@ -611,7 +613,9 @@ void tcpc_run(void)
 			tx_buf_clear(); // No retry
 			alert(TCPC_REG_ALERT_TX_SUCCESS);
 		} else if (cur_timestamp > pd.tx_start_timestamp + 1800 || (pd.tx_retry_count == -1)) {
-			pd_prepare_message(TCPC_REG_TRANSMIT_TYPE(pd.tx_type), pd.tx_len, pd.tx_payload);
+			pd_prepare_message(TCPC_REG_TRANSMIT_TYPE(pd.tx_type), TX_LEN(
+					((uint16_t)pd.tx_payload[0]) | ( ((uint16_t)pd.tx_payload[1])<<8 )
+											), pd.tx_payload);
 			pd_tx(0);
 			pd.tx_start_timestamp = cur_timestamp;
 
