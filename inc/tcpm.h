@@ -21,7 +21,7 @@ void tcpm_set_polarity(int port, int polarity);
 void tcpm_set_vconn(int port, int enable);
 void tcpm_set_msg_header(int port, int power_role, int data_role);
 void tcpm_set_rx_enable(int port, int enable);
-void tcpm_get_message(int port, uint32_t *payload, int *head);
+int tcpm_get_message(int port, uint32_t *payload, int *head);
 void tcpm_transmit(int port, enum tcpm_transmit_type type, uint16_t header, const uint32_t *data);
 
 #ifdef CONFIG_USB_PD_DISCHARGE_TCPC

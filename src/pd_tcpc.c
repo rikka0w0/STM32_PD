@@ -67,7 +67,7 @@ static void alert(uint16_t mask)
 	 */
 	if (pd.alert_mask & mask) {
 		pd.internal_flags |= TCPC_FLAG_INT_ASSERTED;
-		// tcpc_alert();
+		//tcpc_alert(0);
 	}
 }
 

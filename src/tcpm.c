@@ -91,7 +91,7 @@ void tcpm_set_rx_enable(int port, int enable)
 	tcpc_write(TCPC_REG_RX_DETECT, enable ? TCPC_REG_RX_DETECT_SOP_HRST_MASK : 0);
 }
 
-void tcpm_get_message(int port, uint32_t *payload, int *head)
+int tcpm_get_message(int port, uint32_t *payload, int *head)
 {
 	uint8_t cnt;
 	tcpc_read(TCPC_REG_RX_BYTE_CNT, &cnt);
@@ -103,6 +103,8 @@ void tcpm_get_message(int port, uint32_t *payload, int *head)
 
 	/* Read complete, clear RX status alert bit */
 	tcpc_write16(TCPC_REG_ALERT, TCPC_REG_ALERT_RX_STATUS);
+
+	return 0;
 }
 
 void tcpm_transmit(int port, enum tcpm_transmit_type type, uint16_t header, const uint32_t *data)
@@ -150,7 +152,7 @@ void tcpm_set_drp_toggle(int port, int enable)
 }
 #endif
 
-void tcpc_alert()
+void tcpc_alert(int port)
 {
 	uint16_t status;
 

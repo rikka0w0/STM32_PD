@@ -2,8 +2,52 @@
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
-#include "pd.h"
+
+#include "platform.h"
 #include "tcpm.h"
+#include "pd.h"
+
+// Dummy Functions
+void pd_set_input_current_limit(int port, uint32_t max_ma, uint32_t supply_voltage){}
+void pd_power_supply_reset(int port){};
+int pd_svdm(int port, int cnt, uint32_t *payload, uint32_t **rpayload){}
+int pd_custom_vdm(int port, int cnt, uint32_t *payload, uint32_t **rpayload){}
+int pd_build_request(int port, uint32_t *rdo, uint32_t *ma, uint32_t *mv, enum pd_request_type req_type){}
+void pd_process_source_cap(int port, int cnt, uint32_t *src_caps){}
+int pd_check_requested_voltage(uint32_t rdo, const int port){}
+void pd_execute_data_swap(int port, int data_role){}
+int pd_check_power_swap(int port){}
+int pd_check_data_swap(int port, int data_role){}
+int pd_set_power_supply_ready(int port){}
+void pd_transition_voltage(int idx){}
+void pd_check_dr_role(int port, int dr_role, int flags){}
+void pd_check_pr_role(int port, int pr_role, int flags){}
+int tcpm_init(int port){}
+
+
+// Dummy Variables
+/* Voltage indexes for the PDOs */
+enum volt_idx {
+	PDO_IDX_5V  = 0,
+	PDO_IDX_9V  = 1,
+	/* TODO: add PPS support */
+	PDO_IDX_COUNT
+};
+#define PDO_FIXED_FLAGS_EXT (PDO_FIXED_DUAL_ROLE | PDO_FIXED_DATA_SWAP | PDO_FIXED_COMM_CAP | PDO_FIXED_EXTERNAL)
+
+#define PDO_FIXED_FLAGS (PDO_FIXED_DUAL_ROLE | PDO_FIXED_DATA_SWAP | PDO_FIXED_COMM_CAP)
+/* PDOs */
+const uint32_t pd_src_pdo[] = {
+	[PDO_IDX_5V]  = PDO_FIXED(5000,  3000, PDO_FIXED_FLAGS_EXT),
+	[PDO_IDX_9V]  = PDO_FIXED(9000,  2500, PDO_FIXED_FLAGS),
+};
+const int pd_src_pdo_cnt = sizeof(pd_src_pdo);
+
+const uint32_t pd_snk_pdo[] = {
+	PDO_FIXED(5000, 1500, PDO_FIXED_FLAGS),
+};
+const int pd_snk_pdo_cnt = sizeof(pd_snk_pdo);
+
 
 #define MSEC 1000
 #define NULL 0
@@ -15,11 +59,8 @@
 #define PD_POWER_SUPPLY_TURN_ON_DELAY  30000  /* us */
 #define PD_POWER_SUPPLY_TURN_OFF_DELAY 250000 /* us */
 
-// Configs:
-#define CONFIG_COMMON_RUNTIME
-#define CONFIG_USB_PD_PORT_COUNT 1/* Initial DRP / toggle policy */
-#define CONFIG_USB_PD_INITIAL_DRP_STATE PD_DRP_TOGGLE_OFF
-#define CONFIG_USB_PD_PULLUP TYPEC_RP_3A0
+#define CPRINTF(format, args...)
+#define CPRINTS(format, args...)
 
 #ifdef CONFIG_USB_PD_DUAL_ROLE
 #define DUAL_ROLE_IF_ELSE(port, sink_clause, src_clause) \
@@ -152,13 +193,21 @@ static struct pd_protocol {
 	uint32_t pending_event;
 	uint64_t next_protocol_run;		// After this time, we should run protocol while(1) again
 #ifdef CONFIG_USB_PD_DUAL_ROLE
-	uint64_t next_role_swap = PD_T_DRP_SNK;
+	uint64_t next_role_swap;
 #ifndef CONFIG_USB_PD_VBUS_DETECT_NONE
+	int snk_hard_reset_vbus_off;
+#endif
+//#ifdef CONFIG_USB_PD_DUAL_ROLE_AUTO_TOGGLE
+//	const int auto_toggle_supported = tcpm_auto_toggle_supported(port);
+//#endif
+//#if defined(CONFIG_CHARGE_MANAGER)
+//	typec_current_t typec_curr = 0, typec_curr_change = 0;
+//#endif /* CONFIG_CHARGE_MANAGER */
+#endif /* CONFIG_USB_PD_DUAL_ROLE */
 	int hard_reset_count;			// pd_task.hard_reset_count
 	enum pd_cc_states new_cc_state;	// pd_task.new_cc_state
-	int caps_count = 0, hard_reset_sent = 0;
-	int snk_cap_count = 0;
-	int snk_hard_reset_vbus_off = 0;
+	int caps_count, hard_reset_sent;
+	int snk_cap_count;
 } pd[CONFIG_USB_PD_PORT_COUNT];
 
 /**
@@ -292,9 +341,6 @@ static void set_vconn(int port, int enable)
 static inline void set_state(int port, enum pd_states next_state)
 {
 	enum pd_states last_state = pd[port].task_state;
-#ifdef CONFIG_LOW_POWER_IDLE
-	int i;
-#endif
 
 	set_state_timeout(port, 0, 0);
 	pd[port].task_state = next_state;
@@ -368,19 +414,7 @@ static inline void set_state(int port, enum pd_states next_state)
 		tcpm_set_rx_enable(port, 0);
 	}
 
-#ifdef CONFIG_LOW_POWER_IDLE
-	/* If a PD device is attached then disable deep sleep */
-	for (i = 0; i < CONFIG_USB_PD_PORT_COUNT; i++) {
-		if (pd_capable(i))
-			break;
-	}
-	if (i == CONFIG_USB_PD_PORT_COUNT)
-		enable_sleep(SLEEP_MASK_USB_PD);
-	else
-		disable_sleep(SLEEP_MASK_USB_PD);
-#endif
-
-	//CPRINTF("C%d st%d %s\n", port, next_state, pd_state_names[next_state]);\
+	//CPRINTF("C%d st%d %s\n", port, next_state, pd_state_names[next_state]);
 }
 
 /* increment message ID counter */
@@ -475,8 +509,8 @@ static int pd_transmit(int port, enum tcpm_transmit_type type,
 	tcpm_transmit(port, type, header, data);
 
 	/* Wait until TX is complete */
-	evt = task_wait_event_mask(PD_EVENT_TX, PD_T_TCPC_TX_TIMEOUT);
-
+//	evt = task_wait_event_mask(PD_EVENT_TX, PD_T_TCPC_TX_TIMEOUT);
+// TODO
 #ifdef CONFIG_USB_PD_REV30
 	/*
 	 * If the source just completed a transmit, tell
@@ -730,7 +764,7 @@ static void send_sink_cap(int port)
 			pd_get_rev(port), 0);
 
 	bit_len = pd_transmit(port, TCPC_TX_SOP, header, pd_snk_pdo);
-	// CPRINTF("C%d snkCAP>%d\n", port, bit_len);
+	CPRINTF("C%d snkCAP>%d\n", port, bit_len);
 }
 
 static int send_request(int port, uint32_t rdo)
@@ -741,7 +775,7 @@ static int send_request(int port, uint32_t rdo)
 			pd_get_rev(port), 0);
 
 	bit_len = pd_transmit(port, TCPC_TX_SOP, header, &rdo);
-	// CPRINTF("C%d REQ>%d\n", port, bit_len);
+	CPRINTF("C%d REQ>%d\n", port, bit_len);
 
 	return bit_len;
 }
@@ -786,7 +820,7 @@ static void handle_vdm_request(int port, int cnt, uint32_t *payload)
 		return;
 	}
 
-	// CPRINTF("C%d Unhandled VDM VID %04x CMD %04x\n", port, PD_VDO_VID(payload[0]), payload[0] & 0xFFFF);
+	CPRINTF("C%d Unhandled VDM VID %04x CMD %04x\n", port, PD_VDO_VID(payload[0]), payload[0] & 0xFFFF);
 }
 
 void pd_execute_hard_reset(int port)
@@ -1049,9 +1083,6 @@ static void handle_data_request(int port, uint16_t head,
 				if (pd[port].rev == PD_REV30 &&
 					pd[port].power_role == PD_ROLE_SOURCE)
 					sink_can_xmit(port, SINK_TX_OK);
-#endif
-#ifdef CONFIG_USB_PD_DUAL_ROLE
-				pd_set_saved_active(port, 1);
 #endif
 				pd[port].requested_idx = RDO_POS(payload[0]);
 				set_state(port, PD_STATE_SRC_ACCEPTED);
@@ -1346,7 +1377,6 @@ static void handle_ctrl_request(int port, uint16_t head,
 		} else if (pd[port].task_state == PD_STATE_SNK_REQUESTED) {
 			/* explicit contract is now in place */
 			pd[port].flags |= PD_FLAGS_EXPLICIT_CONTRACT;
-			pd_set_saved_active(port, 1);
 			set_state(port, PD_STATE_SNK_TRANSITION);
 #endif
 		}
@@ -1859,16 +1889,6 @@ static void pd_init_tasks(void)
 	if (initialized)
 		return;
 
-#if defined(HAS_TASK_CHIPSET) && defined(CONFIG_USB_PD_DUAL_ROLE)
-	/* Set dual-role state based on chipset power state */
-	if (chipset_in_state(CHIPSET_STATE_ANY_OFF))
-		drp_state = PD_DRP_FORCE_SINK;
-	else if (chipset_in_state(CHIPSET_STATE_ANY_SUSPEND))
-		drp_state = PD_DRP_TOGGLE_OFF;
-	else /* CHIPSET_STATE_ON */
-		drp_state = PD_DRP_TOGGLE_ON;
-#endif
-
 #if defined(CONFIG_USB_PD_COMM_DISABLED)
 	enable = 0;
 #elif defined(CONFIG_USB_PD_COMM_LOCKED)
@@ -1888,29 +1908,24 @@ static void pd_init_tasks(void)
 }
 #endif /* CONFIG_COMMON_RUNTIME */
 
-void protocol_init() {
+void pd_protocol_init() {
 	int port = 0;
+	pd[port].next_role_swap = PD_T_DRP_SNK;
+	pd[port].snk_hard_reset_vbus_off = 0;
+	pd[port].caps_count = 0;
+	pd[port].hard_reset_sent = 0;
+	pd[port].snk_cap_count = 0;
+
+
 	int timeout = 10*MSEC;
 	int cc1, cc2;
 	int res;
-#ifdef CONFIG_USB_PD_DUAL_ROLE
-	uint64_t next_role_swap = PD_T_DRP_SNK;
-#ifndef CONFIG_USB_PD_VBUS_DETECT_NONE
-	int snk_hard_reset_vbus_off = 0;
-#endif
 
 #if defined(CONFIG_CHARGE_MANAGER)
 	typec_current_t typec_curr = 0, typec_curr_change = 0;
 #endif /* CONFIG_CHARGE_MANAGER */
-#endif /* CONFIG_USB_PD_DUAL_ROLE */
 	enum pd_states this_state;
-	enum pd_cc_states new_cc_state;
-	uint64_t now;
 
-	int caps_count = 0, hard_reset_sent = 0;
-	int snk_cap_count = 0;
-
-	int evt;
 
 #ifdef CONFIG_COMMON_RUNTIME
 	pd_init_tasks();
@@ -1998,9 +2013,9 @@ void protocol_init() {
 #endif
 }
 
-void pd_task(void *u)
+void pd_protocol_run()
 {
-	int port = 0;
+	const int port = 0;
 	uint64_t now = timestamp_get();
 
 	/* wait for next event/packet or timeout expiration */
@@ -2008,10 +2023,10 @@ void pd_task(void *u)
 	evt |= pd[port].pending_event;
 	if (!evt)
 		return;	// Nothing happens
+	pd[port].pending_event = 0;	// Clear all pending events
 
 	enum pd_states this_state = pd[port].task_state;
 
-	int incoming_packet = 0;
 	int cc1, cc2;
 	uint64_t timeout;
 	int head;
@@ -2092,8 +2107,7 @@ void pd_task(void *u)
 #endif
 
 		/* process any potential incoming message */
-		incoming_packet = evt & PD_EVENT_RX;
-		if (incoming_packet) {
+		if (evt & PD_EVENT_RX) {
 			if (!tcpm_get_message(port, payload, &head))
 				handle_request(port, head, payload);
 		}
@@ -2393,7 +2407,7 @@ void pd_task(void *u)
 			 * incoming packet or if VDO response pending to avoid
 			 * collisions.
 			 */
-			if (incoming_packet ||
+			if ((evt & PD_EVENT_RX) ||
 			    (pd[port].vdm_state == VDM_STATE_BUSY))
 				break;
 
@@ -2848,7 +2862,7 @@ void pd_task(void *u)
 			 * incoming packet or if VDO response pending to avoid
 			 * collisions.
 			 */
-			if (incoming_packet ||
+			if ((evt & PD_EVENT_RX) ||
 			    (pd[port].vdm_state == VDM_STATE_BUSY))
 				break;
 
@@ -3202,10 +3216,10 @@ void pd_task(void *u)
 
 		/* Check for disconnection if we're connected */
 		if (!pd_is_connected(port))
-			continue;
+			return;
 #ifdef CONFIG_USB_PD_DUAL_ROLE
 		if (pd_is_power_swapping(port))
-			continue;
+			return;
 #endif
 		if (pd[port].power_role == PD_ROLE_SOURCE) {
 			/* Source: detect disconnect by monitoring CC */
@@ -3254,50 +3268,6 @@ void pd_task(void *u)
 		}
 #endif /* CONFIG_USB_PD_DUAL_ROLE */
 }
-
-#ifdef CONFIG_USB_PD_DUAL_ROLE
-static void pd_chipset_resume(void)
-{
-	int i;
-
-	for (i = 0; i < CONFIG_USB_PD_PORT_COUNT; i++) {
-#ifdef CONFIG_CHARGE_MANAGER
-		if (charge_manager_get_active_charge_port() != i)
-#endif
-			pd[i].flags |= PD_FLAGS_CHECK_PR_ROLE |
-				       PD_FLAGS_CHECK_DR_ROLE;
-	}
-
-	pd_set_dual_role(PD_DRP_TOGGLE_ON);
-	CPRINTS("PD:S3->S0");
-}
-//DECLARE_HOOK(HOOK_CHIPSET_RESUME, pd_chipset_resume, HOOK_PRIO_DEFAULT);
-
-static void pd_chipset_suspend(void)
-{
-	pd_set_dual_role(PD_DRP_TOGGLE_OFF);
-	CPRINTS("PD:S0->S3");
-}
-//DECLARE_HOOK(HOOK_CHIPSET_SUSPEND, pd_chipset_suspend, HOOK_PRIO_DEFAULT);
-
-static void pd_chipset_startup(void)
-{
-	int i;
-	pd_set_dual_role(PD_DRP_TOGGLE_OFF);
-	for (i = 0; i < CONFIG_USB_PD_PORT_COUNT; i++)
-		pd[i].flags |= PD_FLAGS_CHECK_IDENTITY;
-	CPRINTS("PD:S5->S3");
-}
-//DECLARE_HOOK(HOOK_CHIPSET_STARTUP, pd_chipset_startup, HOOK_PRIO_DEFAULT);
-
-static void pd_chipset_shutdown(void)
-{
-	pd_set_dual_role(PD_DRP_FORCE_SINK);
-	CPRINTS("PD:S3->S5");
-}
-//DECLARE_HOOK(HOOK_CHIPSET_SHUTDOWN, pd_chipset_shutdown, HOOK_PRIO_DEFAULT);
-
-#endif /* CONFIG_USB_PD_DUAL_ROLE */
 
 #ifdef CONFIG_COMMON_RUNTIME
 int pd_is_port_enabled(int port)

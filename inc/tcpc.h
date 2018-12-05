@@ -7,7 +7,7 @@
 #define __PD_TCPC_H
 
 // Implement in TCPC/TCPM driver or somewhere else
-void tcpc_alert();
+void tcpc_alert(int port);
 
 /* Default retry count for transmitting */
 #define PD_RETRY_COUNT 3

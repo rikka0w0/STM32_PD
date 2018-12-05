@@ -8,6 +8,16 @@
 #ifndef __CROS_EC_USB_PD_H
 #define __CROS_EC_USB_PD_H
 
+
+
+// Configs:
+#define CONFIG_COMMON_RUNTIME
+#define CONFIG_USB_PD_PORT_COUNT 1/* Initial DRP / toggle policy */
+#define CONFIG_USB_PD_INITIAL_DRP_STATE PD_DRP_TOGGLE_OFF
+#define CONFIG_USB_PD_PULLUP TYPEC_RP_3A0
+
+
+#include <stdint.h>
 // #include "common.h"
 
 /* PD Host command timeout */
