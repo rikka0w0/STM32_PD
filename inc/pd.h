@@ -43,6 +43,14 @@
 #define PD_EVENT_CC               (1<<4) /* CC line change event */
 #define PD_EVENT_TCPC_RESET       (1<<5) /* TCPC has reset */
 #define PD_EVENT_UPDATE_DUAL_ROLE (1<<6) /* DRP state has changed */
+/* task_wake() called on task */
+#define TASK_EVENT_WAKE		(1 << 29)
+/*
+ * Timer expired.  For example, task_wait_event() timed out before receiving
+ * another event.
+ */
+#define TASK_EVENT_TIMER	(1U << 31)
+#define EC_SUCCESS 0
 
 /* --- PD data message helpers --- */
 #define PDO_MAX_OBJECTS   7

@@ -1,0 +1,16 @@
+1. timestamp_t -> uint64_t
+2. Remove Chrome EC OS stuff in protocol layer struct (/* Attached ChromeOS device id, RW hash, and current RO / RW image */)
+3. Remove command_pd, section "#ifdef HAS_TASK_HOSTCMD", section "#ifdef CONFIG_CMD_PD_CONTROL", section "#if defined(CONFIG_CMD_PD) && defined(CONFIG_CMD_PD_FLASH)"
+4. Remove debug outputs, section "#ifdef CONFIG_COMMON_RUNTIME", "#define CPRINTF(format, args...)"...
+5. Remove "static const char * const pd_state_names[]"
+6. Remove "static struct ec_params_usb_pd_rw_hash_entry rw_hash_table[RW_HASH_ENTRIES];"
+7. "int pd_comm_is_enabled(int port)" always return 1
+8. "#define TASK_EVENT_TIMER	(1U << 31)" from "task.h" to "pd.h"
+9. Remove "static int pd_get_saved_active(int port)", "static void pd_set_saved_active(int port, int val)"
+10. Remove BIST support, "static int send_bist_cmd(int port)"
+11. Remove section "#ifdef CONFIG_CMD_PD_DEV_DUMP_INFO"
+12. Remove function "int pd_dev_store_rw_hash(int port, uint16_t dev_id, uint32_t *rw_hash, uint32_t current_image)"
+13. Remove "PD_STATE_BIST_RX", "PD_STATE_BIST_TX" and "static int send_bist_cmd(int port)"
+14. Remove "int pd_fetch_acc_log_entry(int port)"
+15. Remove "static int pd_restart_tcpc(int port)", "void pd_set_suspend(int port, int enable)", "uint8_t req_suspend_state;", "static int pd_restart_tcpc(int port)" and "case PD_STATE_SUSPENDED: {"
+16. Remove "hook_call_deferred(&pd_usb_billboard_deferred_data,	PD_T_AME);"

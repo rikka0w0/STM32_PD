@@ -29,7 +29,7 @@ void tcpc_discharge_vbus(int port, int enable);
 #endif
 
 #ifdef CONFIG_USB_PD_DUAL_ROLE_AUTO_TOGGLE
-void tcpc_drp_toggle(int port, int enable);
+void tcpm_set_drp_toggle(int port, int enable);
 #endif
 
 #endif // #ifndef __PD_TCPM_H
