@@ -7,6 +7,9 @@
 #include "tcpm.h"
 #include "pd.h"
 
+//#define CONFIG_USB_PD_USE_VDM
+//#define CONFIG_USB_PD_SEND_DISCOVER_IDENT
+
 // Dummy Functions
 void pd_set_input_current_limit(int port, uint32_t max_ma, uint32_t supply_voltage){}
 void pd_power_supply_reset(int port){};
@@ -80,6 +83,7 @@ const int pd_snk_pdo_cnt = sizeof(pd_snk_pdo);
 #define PD_CAPS_COUNT 50
 #define PD_SNK_CAP_RETRIES 3
 
+#ifdef CONFIG_USB_PD_USE_VDM
 enum vdm_states {
 	VDM_STATE_ERR_BUSY = -3,
 	VDM_STATE_ERR_SEND = -2,
@@ -90,6 +94,7 @@ enum vdm_states {
 	VDM_STATE_BUSY = 2,
 	VDM_STATE_WAIT_RSP_BUSY = 3,
 };
+#endif
 
 #ifdef CONFIG_USB_PD_DUAL_ROLE
 /* Port dual-role state */
@@ -113,6 +118,7 @@ static const uint8_t refuse[] = {
 #define REFUSE(r) PD_CTRL_REJECT
 #endif
 
+#ifdef CONFIG_USB_PD_USE_VDM
 #ifdef CONFIG_USB_PD_REV30
 /*
  * The spec. revision is used to index into this array.
@@ -126,6 +132,7 @@ static const uint8_t vdo_ver[] = {
 #else
 #define VDO_VER(v) VDM_VER10
 #endif
+#endif // #ifdef CONFIG_USB_PD_USE_VDM
 
 static struct pd_protocol {
 	/* current port power role (SOURCE or SINK) */
@@ -169,6 +176,7 @@ static struct pd_protocol {
 	uint64_t try_src_marker;
 #endif
 
+#ifdef CONFIG_USB_PD_USE_VDM
 	/* PD state for Vendor Defined Messages */
 	enum vdm_states vdm_state;
 	/* Timeout for the current vdm state.  Set to 0 for no timeout. */
@@ -178,6 +186,7 @@ static struct pd_protocol {
 	uint8_t vdo_count;
 	/* VDO to retry if UFP responder replied busy. */
 	uint32_t vdo_retry;
+#endif
 
 #ifdef CONFIG_USB_PD_REV30
 	/* PD Collision avoidance buffer */
@@ -781,6 +790,8 @@ static int send_request(int port, uint32_t rdo)
 }
 #endif /* CONFIG_USB_PD_DUAL_ROLE */
 
+
+#ifdef CONFIG_USB_PD_USE_VDM
 static void queue_vdm(int port, uint32_t *header, const uint32_t *data,
 			     int data_cnt)
 {
@@ -822,6 +833,7 @@ static void handle_vdm_request(int port, int cnt, uint32_t *payload)
 
 	CPRINTF("C%d Unhandled VDM VID %04x CMD %04x\n", port, PD_VDO_VID(payload[0]), payload[0] & 0xFFFF);
 }
+#endif // #ifdef CONFIG_USB_PD_USE_VDM
 
 void pd_execute_hard_reset(int port)
 {
@@ -1122,9 +1134,11 @@ static void handle_data_request(int port, uint16_t head,
 	case PD_DATA_BATTERY_STATUS:
 		break;
 #endif
+#ifdef CONFIG_USB_PD_USE_VDM
 	case PD_DATA_VENDOR_DEF:
 		handle_vdm_request(port, cnt, payload);
 		break;
+#endif
 	default:
 		CPRINTF("C%d Unhandled data message type %d\n", port, type);
 	}
@@ -1500,6 +1514,7 @@ static void handle_request(int port, uint16_t head,
 		handle_ctrl_request(port, head, payload);
 }
 
+#ifdef CONFIG_USB_PD_USE_VDM
 void pd_send_vdm(int port, uint32_t vid, int cmd, const uint32_t *data,
 		 int count)
 {
@@ -1518,6 +1533,7 @@ void pd_send_vdm(int port, uint32_t vid, int cmd, const uint32_t *data,
 
 	task_wake(PD_PORT_TO_TASK_ID(port));
 }
+#endif // #ifdef CONFIG_USB_PD_USE_VDM
 
 static inline int pdo_busy(int port)
 {
@@ -1533,6 +1549,7 @@ static inline int pdo_busy(int port)
 	return rv;
 }
 
+#ifdef CONFIG_USB_PD_USE_VDM
 static uint64_t vdm_get_ready_timeout(uint32_t vdm_hdr)
 {
 	uint64_t timeout;
@@ -1613,6 +1630,7 @@ static void pd_vdm_send_state_machine(int port)
 		break;
 	}
 }
+#endif // #ifdef CONFIG_USB_PD_USE_VDM
 
 #ifdef CONFIG_USB_PD_DUAL_ROLE
 enum pd_dual_role_states pd_get_dual_role(void)
@@ -1979,7 +1997,9 @@ void pd_protocol_init() {
 
 	/* Initialize PD protocol state variables for each port. */
 	pd[port].power_role = PD_ROLE_DEFAULT(port);
+#ifdef CONFIG_USB_PD_USE_VDM
 	pd[port].vdm_state = VDM_STATE_DONE;
+#endif // #ifdef CONFIG_USB_PD_USE_VDM
 	set_state(port, this_state);
 #ifdef CONFIG_USB_PD_MAX_SINGLE_SOURCE_CURRENT
 	ASSERT(PD_ROLE_DEFAULT(port) == PD_ROLE_SINK);
@@ -2040,8 +2060,11 @@ void pd_protocol_run()
 	/* send any pending messages */
 	pd_ca_send_pending(port);
 #endif
+
+#ifdef CONFIG_USB_PD_USE_VDM
 	/* process VDM messages last */
 	pd_vdm_send_state_machine(port);
+#endif
 
 	/* Verify board specific health status : current, voltages... */
 //	if (pd_board_checks() != EC_SUCCESS) {
@@ -2086,13 +2109,19 @@ void pd_protocol_run()
 			 * Otherwise, go to the default disconnected state
 			 * and force renegotiation.
 			 */
-			if (pd[port].vdm_state == VDM_STATE_DONE && (
+			if (
+#ifdef CONFIG_USB_PD_USE_VDM
+					(pd[port].vdm_state == VDM_STATE_DONE) &&
+#endif // #ifdef CONFIG_USB_PD_USE_VDM
+				(
 #ifdef CONFIG_USB_PD_DUAL_ROLE
 			     (PD_ROLE_DEFAULT(port) == PD_ROLE_SINK &&
 			     pd[port].task_state == PD_STATE_SNK_READY) ||
 #endif
 			     (PD_ROLE_DEFAULT(port) == PD_ROLE_SOURCE &&
-			     pd[port].task_state == PD_STATE_SRC_READY))) {
+			     pd[port].task_state == PD_STATE_SRC_READY)
+				 )
+			) {
 				set_polarity(port, pd[port].polarity);
 				tcpm_set_msg_header(port, pd[port].power_role,
 						    pd[port].data_role);
@@ -2100,7 +2129,9 @@ void pd_protocol_run()
 			} else {
 				/* Ensure state variables are at default */
 				pd[port].power_role = PD_ROLE_DEFAULT(port);
+#ifdef CONFIG_USB_PD_USE_VDM
 				pd[port].vdm_state = VDM_STATE_DONE;
+#endif // #ifdef CONFIG_USB_PD_USE_VDM
 				set_state(port, PD_DEFAULT_STATE(port));
 			}
 		}
@@ -2407,8 +2438,11 @@ void pd_protocol_run()
 			 * incoming packet or if VDO response pending to avoid
 			 * collisions.
 			 */
-			if ((evt & PD_EVENT_RX) ||
-			    (pd[port].vdm_state == VDM_STATE_BUSY))
+			if ((evt & PD_EVENT_RX)
+#ifdef CONFIG_USB_PD_USE_VDM
+					||(pd[port].vdm_state == VDM_STATE_BUSY)
+#endif // #ifdef CONFIG_USB_PD_USE_VDM
+				)
 				break;
 
 			/* Send updated source capabilities to our partner */
@@ -2454,11 +2488,10 @@ void pd_protocol_run()
 
 			/* Send discovery SVDMs last */
 			if (pd[port].data_role == PD_ROLE_DFP &&
-			    (pd[port].flags & PD_FLAGS_CHECK_IDENTITY)) {
-#ifndef CONFIG_USB_PD_SIMPLE_DFP
-				pd_send_vdm(port, USB_SID_PD,
-					    CMD_DISCOVER_IDENT, NULL, 0);
-#endif
+			    (pd[port].flags & PD_FLAGS_CHECK_IDENTITY)) {	// TODO
+#ifdef CONFIG_USB_PD_SEND_DISCOVER_IDENT
+				pd_send_vdm(port, USB_SID_PD, CMD_DISCOVER_IDENT, NULL, 0);
+#endif // #ifdef CONFIG_USB_PD_SEND_DISCOVER_IDENT
 				pd[port].flags &= ~PD_FLAGS_CHECK_IDENTITY;
 				break;
 			}
@@ -2862,8 +2895,11 @@ void pd_protocol_run()
 			 * incoming packet or if VDO response pending to avoid
 			 * collisions.
 			 */
-			if ((evt & PD_EVENT_RX) ||
-			    (pd[port].vdm_state == VDM_STATE_BUSY))
+			if ((evt & PD_EVENT_RX)
+#ifdef CONFIG_USB_PD_USE_VDM
+				|| (pd[port].vdm_state == VDM_STATE_BUSY)
+#endif // #ifdef CONFIG_USB_PD_USE_VDM
+				)
 				break;
 
 			/* Check for new power to request */
@@ -2892,8 +2928,9 @@ void pd_protocol_run()
 			/* If DFP, send discovery SVDMs */
 			if (pd[port].data_role == PD_ROLE_DFP &&
 			     (pd[port].flags & PD_FLAGS_CHECK_IDENTITY)) {
-				pd_send_vdm(port, USB_SID_PD,
-					    CMD_DISCOVER_IDENT, NULL, 0);
+#ifdef CONFIG_USB_PD_SEND_DISCOVER_IDENT
+				pd_send_vdm(port, USB_SID_PD, CMD_DISCOVER_IDENT, NULL, 0);
+#endif // #ifdef CONFIG_USB_PD_SEND_DISCOVER_IDENT
 				pd[port].flags &= ~PD_FLAGS_CHECK_IDENTITY;
 				break;
 			}
