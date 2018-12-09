@@ -96,7 +96,7 @@ int tcpm_get_message(int port, uint32_t *payload, int *head)
 	uint8_t cnt;
 	tcpc_read(TCPC_REG_RX_BYTE_CNT, &cnt);
 	uint16_t header;
-	tcpc_read(TCPC_REG_RX_BYTE_CNT, (uint8_t*)&header);
+	tcpc_read(TCPC_REG_RX_HDR, (uint8_t*)&header);
 	*head = header;
 	if (cnt>3)
 		tcpc_read(TCPC_REG_RX_DATA, (uint8_t*)payload);
@@ -170,7 +170,7 @@ void tcpc_alert(int port)
 
 	if (status & TCPC_REG_ALERT_CC_STATUS) {
 		/* CC status changed, wake task */
-		// task_set_event(PD_PORT_TO_TASK_ID(port), PD_EVENT_CC, 0);
+		task_set_event(PD_PORT_TO_TASK_ID(port), PD_EVENT_CC, 0);
 	}
 
 	if (status & TCPC_REG_ALERT_POWER_STATUS) {
@@ -183,7 +183,7 @@ void tcpc_alert(int port)
 			 * If power status mask has been reset, then the TCPC
 			 * has reset.
 			 */
-			// task_set_event(PD_PORT_TO_TASK_ID(port), PD_EVENT_TCPC_RESET, 0);
+			task_set_event(PD_PORT_TO_TASK_ID(port), PD_EVENT_TCPC_RESET, 0);
 #if defined(CONFIG_USB_PD_VBUS_DETECT_TCPC) && defined(CONFIG_USB_CHARGER)
 		} else {
 			/* Read Power Status register */
@@ -191,21 +191,73 @@ void tcpc_alert(int port)
 			/* Update charge manager with new VBUS state */
 			usb_charger_vbus_change(port,
 				reg & TCPC_REG_POWER_STATUS_VBUS_PRES);
-			task_wake(PD_PORT_TO_TASK_ID(port));
+			task_set_event(PD_PORT_TO_TASK_ID(port), TASK_EVENT_WAKE, 0);
 #endif /* CONFIG_USB_PD_VBUS_DETECT_TCPC && CONFIG_USB_CHARGER */
 		}
 	}
 	if (status & TCPC_REG_ALERT_RX_STATUS) {
 		/* message received */
-		// task_set_event(PD_PORT_TO_TASK_ID(port), PD_EVENT_RX, 0);
+		task_set_event(PD_PORT_TO_TASK_ID(port), PD_EVENT_RX, 0);
 	}
 	if (status & TCPC_REG_ALERT_RX_HARD_RST) {
 		/* hard reset received */
-		// pd_execute_hard_reset(port);
-		// task_wake(PD_PORT_TO_TASK_ID(port));
+		pd_execute_hard_reset(port);
+		task_set_event(PD_PORT_TO_TASK_ID(port), TASK_EVENT_WAKE, 0);
 	}
 	if (status & TCPC_REG_ALERT_TX_COMPLETE) {
 		/* transmit complete */
-		// pd_transmit_complete(port, status & TCPC_REG_ALERT_TX_SUCCESS ? TCPC_TX_COMPLETE_SUCCESS : TCPC_TX_COMPLETE_FAILED);
+		pd_transmit_complete(port, status & TCPC_REG_ALERT_TX_SUCCESS ? TCPC_TX_COMPLETE_SUCCESS : TCPC_TX_COMPLETE_FAILED);
 	}
+}
+
+/*
+ * On TCPC i2c failure, make 30 tries (at least 300ms) before giving up
+ * in order to allow the TCPC time to boot / reset.
+ */
+
+int tcpm_init(int port)
+{
+	uint8_t power_status;
+
+// 	TCPC_REG_POWER_STATUS_UNINIT should not be observed since our tcpc is always initialized first
+//	tcpc_read(TCPC_REG_POWER_STATUS, &power_status);
+//		/*
+//		 * If read succeeds and the uninitialized bit is clear, then
+//		 * initalization is complete, clear all alert bits and write
+//		 * the initial alert mask.
+//		 */
+//	if (!(power_status & TCPC_REG_POWER_STATUS_UNINIT))
+//		return -1;
+
+
+	/* Set Power Status mask */
+#ifdef CONFIG_USB_PD_VBUS_DETECT_TCPC
+	tcpc_write(TCPC_REG_POWER_STATUS_MASK , TCPC_REG_POWER_STATUS_VBUS_PRES);
+#else
+	tcpc_write(TCPC_REG_POWER_STATUS_MASK , 0);
+#endif
+
+	/* Clear alert request and set alert mask */
+	tcpc_write16(TCPC_REG_ALERT, 0xffff);
+
+	/* Initialize power_status_mask */
+
+	/* Set the alert mask in TCPC */
+	tcpc_write16(TCPC_REG_ALERT_MASK,
+			/*
+			 * Create mask of alert events that will cause the TCPC to
+			 * signal the TCPM via the Alert# gpio line.
+			 */
+					TCPC_REG_ALERT_TX_SUCCESS | TCPC_REG_ALERT_TX_FAILED |
+					TCPC_REG_ALERT_TX_DISCARDED | TCPC_REG_ALERT_RX_STATUS |
+					TCPC_REG_ALERT_RX_HARD_RST | TCPC_REG_ALERT_CC_STATUS
+#ifdef CONFIG_USB_PD_VBUS_DETECT_TCPC
+					| TCPC_REG_ALERT_POWER_STATUS
+#endif
+			);
+
+	/* Read chip info here when we know the chip is awake. */
+	tcpm_get_chip_info(port, 1, NULL);
+
+	return EC_SUCCESS;
 }

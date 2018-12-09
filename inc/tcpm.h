@@ -4,11 +4,6 @@
 #include <stdint.h>
 #include "tcpc.h"
 
-// Available flags
-#define CONFIG_USB_PD_VBUS_DETECT_TCPC
-#define CONFIG_USB_PD_DISCHARGE_TCPC
-#define CONFIG_USB_PD_DUAL_ROLE_AUTO_TOGGLE
-
 void tcpm_get_cc(int port, int* cc1, int* cc2);
 
 #ifdef CONFIG_USB_PD_VBUS_DETECT_TCPC
@@ -31,5 +26,9 @@ void tcpc_discharge_vbus(int port, int enable);
 #ifdef CONFIG_USB_PD_DUAL_ROLE_AUTO_TOGGLE
 void tcpm_set_drp_toggle(int port, int enable);
 #endif
+int tcpm_init(int port);
+
+#define tcpm_get_chip_info(port, renew, info)
+#define tcpm_auto_toggle_supported(port) 1
 
 #endif // #ifndef __PD_TCPM_H

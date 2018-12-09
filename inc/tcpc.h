@@ -157,11 +157,10 @@ enum tcpc_transmit_complete {
 #define TCPC_REG_RX_DETECT_SOPP 0x02
 #define TCPC_REG_RX_DETECT_SOP 0x01
 #define TCPC_REG_RX_ENABLED(regval) (regval&0x7F)
-#define TCPC_REG_RX_DETECT_SOP_HRST_MASK (TCPC_REG_RX_DETECT_HRST|TCPC_REG_RX_DETECT_CRST)
+#define TCPC_REG_RX_DETECT_SOP_HRST_MASK (TCPC_REG_RX_DETECT_SOP|TCPC_REG_RX_DETECT_HRST)
 
 #define TCPC_REG_RX_BYTE_CNT       0x30
 #define TCPC_REG_RX_BUF_FRAME_TYPE 0x31
-
 #define TCPC_REG_RX_HDR            0x32
 #define TCPC_REG_RX_DATA           0x34 /* through 0x4f */
 

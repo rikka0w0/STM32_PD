@@ -67,7 +67,7 @@ static void alert(uint16_t mask)
 	 */
 	if (pd.alert_mask & mask) {
 		pd.internal_flags |= TCPC_FLAG_INT_ASSERTED;
-		//tcpc_alert(0);
+		tcpc_alert(0);
 	}
 }
 
@@ -320,7 +320,12 @@ uint32_t tcpc_i2c_read(uint8_t reg, uint8_t *payload)
 			payload[0] = TCPC_REG_CC_STATUS_LOOK4CONNECTION_MASK;
 		} else {
 			payload[0] = TCPC_REG_CC_STATUS_SET(
-					(pd.internal_flags& TCPC_FLAG_CON_RESULT) ? 1 : 0,
+					// Connection Result
+					(pd.cc_role_ctrl&TCPC_REG_ROLE_CTRL_DRP_MASK)
+					? ((pd.internal_flags & TCPC_FLAG_CON_RESULT) ? 1 : 0)
+					: ( TCPC_REG_CC_STATUS_CC1(pd.cc_role_ctrl) == TYPEC_CC_RD &&
+						TCPC_REG_CC_STATUS_CC2(pd.cc_role_ctrl) == TYPEC_CC_RD),
+
 					// If ((POWER_CONTROL.EnableVconn=1 and TCPC_CONTROL.PlugOrientation=1))
 					// or ROLE_CONTROL.CC1=Ra or ROLE_CONTROL.CC1=open
 					(TCPC_REG_POWER_CTRL_VCONN(pd.cc_power_ctrl) && TCPC_REG_TCPC_CTRL_POLARITY(pd.cc_tcpc_ctrl)) || (

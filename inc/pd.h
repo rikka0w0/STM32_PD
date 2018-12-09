@@ -4,39 +4,39 @@
  */
 
 /* USB Power delivery module */
+//#define CONFIG_USB_PD_USE_VDM				// Enable VDM reception and transmission
+//#define CONFIG_USB_PD_SEND_DISCOVER_IDENT	// Send DISCOVER_IDENTITY VDM
+#define CONFIG_USB_PD_FUNC_SNK			// Can act as a sink
+//#define CONFIG_USD_PD_FUNC_SRC			// Can act as a source
+//#define CONFIG_USB_PD_DR_SWAP				// Support DR_SWAP
+#if defined(CONFIG_USB_PD_FUNC_SNK) && defined(CONFIG_USD_PD_FUNC_SRC)
 #define CONFIG_USB_PD_DUAL_ROLE 1
-#ifndef __CROS_EC_USB_PD_H
-#define __CROS_EC_USB_PD_H
+#endif
 
-
+// Available flags
+//#define CONFIG_USB_PD_VBUS_DETECT_TCPC
+//#define CONFIG_USB_PD_DISCHARGE_TCPC
+// #define CONFIG_USB_PD_DUAL_ROLE_AUTO_TOGGLE
 
 // Configs:
-#define CONFIG_COMMON_RUNTIME
+// #define CONFIG_COMMON_RUNTIME
 #define CONFIG_USB_PD_PORT_COUNT 1/* Initial DRP / toggle policy */
 #define CONFIG_USB_PD_INITIAL_DRP_STATE PD_DRP_TOGGLE_OFF
 #define CONFIG_USB_PD_PULLUP TYPEC_RP_3A0
 
+#ifndef __CROS_EC_USB_PD_H
+#define __CROS_EC_USB_PD_H
+
+#define MSEC 1000
 
 #include <stdint.h>
 // #include "common.h"
 
-/* PD Host command timeout */
-#define PD_HOST_COMMAND_TIMEOUT_US SECOND
-
 #ifdef CONFIG_USB_PD_PORT_COUNT
-/*
- * Define PD_PORT_TO_TASK_ID() and TASK_ID_TO_PD_PORT() macros to
- * go between PD port number and task ID. Assume that TASK_ID_PD_C0 is the
- * lowest task ID and IDs are on a continuous range.
- */
-#ifdef HAS_TASK_PD_C0
-#define PD_PORT_TO_TASK_ID(port) (TASK_ID_PD_C0 + (port))
-#define TASK_ID_TO_PD_PORT(id) ((id) - TASK_ID_PD_C0)
-#else
-#define PD_PORT_TO_TASK_ID(port) -1 /* dummy task ID */
-#define TASK_ID_TO_PD_PORT(id) 0
-#endif /* CONFIG_COMMON_RUNTIME */
+#define PD_PORT_TO_TASK_ID(port) port /* dummy task ID */
+#define TASK_ID_TO_PD_PORT(id) id
 #endif /* CONFIG_USB_PD_PORT_COUNT */
+void task_set_event(uint32_t port, uint32_t event, int wait);
 
 //enum pd_rx_errors {
 //	PD_RX_ERR_INVAL = -1,           /* Invalid packet */
@@ -661,7 +661,7 @@ struct pd_policy {
 enum pd_states {
 	PD_STATE_DISABLED,
 	PD_STATE_SUSPENDED,
-#ifdef CONFIG_USB_PD_DUAL_ROLE
+//#ifdef CONFIG_USB_PD_DUAL_ROLE
 	PD_STATE_SNK_DISCONNECTED,
 	PD_STATE_SNK_DISCONNECTED_DEBOUNCE,
 	PD_STATE_SNK_HARD_RESET_RECOVER,
@@ -675,7 +675,7 @@ enum pd_states {
 	PD_STATE_SNK_SWAP_SRC_DISABLE,
 	PD_STATE_SNK_SWAP_STANDBY,
 	PD_STATE_SNK_SWAP_COMPLETE,
-#endif /* CONFIG_USB_PD_DUAL_ROLE */
+//#endif /* CONFIG_USB_PD_DUAL_ROLE */
 
 	PD_STATE_SRC_DISCONNECTED,
 	PD_STATE_SRC_DISCONNECTED_DEBOUNCE,
@@ -690,7 +690,7 @@ enum pd_states {
 	PD_STATE_SRC_GET_SINK_CAP,
 	PD_STATE_DR_SWAP,
 
-#ifdef CONFIG_USB_PD_DUAL_ROLE
+//#ifdef CONFIG_USB_PD_DUAL_ROLE
 	PD_STATE_SRC_SWAP_INIT,
 	PD_STATE_SRC_SWAP_SNK_DISABLE,
 	PD_STATE_SRC_SWAP_SRC_DISABLE,
@@ -701,7 +701,7 @@ enum pd_states {
 	PD_STATE_VCONN_SWAP_INIT,
 	PD_STATE_VCONN_SWAP_READY,
 #endif /* CONFIG_USBC_VCONN_SWAP */
-#endif /* CONFIG_USB_PD_DUAL_ROLE */
+//#endif /* CONFIG_USB_PD_DUAL_ROLE */
 
 	PD_STATE_SOFT_RESET,
 	PD_STATE_HARD_RESET_SEND,
@@ -735,6 +735,7 @@ enum pd_states {
 #define PD_FLAGS_PARTNER_USB_COMM  (1 << 14)/* port partner is USB comms */
 #define PD_FLAGS_UPDATE_SRC_CAPS   (1 << 15)/* send new source capabilities */
 #define PD_FLAGS_TS_DTS_PARTNER    (1 << 16)/* partner has rp/rp or rd/rd */
+#define PD_FLAGS_TX_GOING_ON       (1 << 17)/* Protocol layer has sent a message and is waiting for outcomes */
 /* Flags to clear on a disconnect */
 #define PD_FLAGS_RESET_ON_DISCONNECT_MASK (PD_FLAGS_PARTNER_DR_POWER | \
 					   PD_FLAGS_PARTNER_DR_DATA | \
@@ -900,7 +901,7 @@ enum pd_data_msg_type {
 
 /* Port role at startup */
 #ifndef PD_ROLE_DEFAULT
-#ifdef CONFIG_USB_PD_DUAL_ROLE
+#ifdef CONFIG_USB_PD_FUNC_SNK
 #define PD_ROLE_DEFAULT(port) PD_ROLE_SINK
 #else
 #define PD_ROLE_DEFAULT(port) PD_ROLE_SOURCE
@@ -908,13 +909,13 @@ enum pd_data_msg_type {
 #endif
 
 /* Port default state at startup */
-#ifdef CONFIG_USB_PD_DUAL_ROLE
+//#ifdef CONFIG_USB_PD_DUAL_ROLE
 #define PD_DEFAULT_STATE(port) ((PD_ROLE_DEFAULT(port) == PD_ROLE_SOURCE) ? \
 				PD_STATE_SRC_DISCONNECTED :	      \
 				PD_STATE_SNK_DISCONNECTED)
-#else
-#define PD_DEFAULT_STATE(port) PD_STATE_SRC_DISCONNECTED
-#endif
+//#else
+//#define PD_DEFAULT_STATE(port) PD_STATE_SRC_DISCONNECTED
+//#endif
 
 /* build extended message header */
 /* All extended messages are chunked, so set bit 15 */

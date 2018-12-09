@@ -17,3 +17,5 @@
 17. Remove "#ifdef CONFIG_LOW_POWER_IDLE"
 18. Remove "pd_chipset_*", "#if defined(HAS_TASK_CHIPSET) && defined(CONFIG_USB_PD_DUAL_ROLE)"
 19. "#ifndef CONFIG_USB_PD_SIMPLE_DFP" to "#ifdef CONFIG_USB_PD_SEND_DISCOVER_IDENT"
+20. Remove "static int send_request(int port, uint32_t rdo)"
+21. Remove "static void inc_id(int port)"
