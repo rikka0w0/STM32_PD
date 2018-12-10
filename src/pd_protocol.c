@@ -162,6 +162,13 @@ static const uint8_t vdo_ver[] = {
 #endif // #ifdef CONFIG_USB_PD_USE_VDM
 
 typedef int (*TX_DONE_CALLBACK)(int, int, void*);
+enum pd_protocol_context {
+	PDC_CA_SENT,
+	PDC_VDM_SENT,
+	PDC_BOARD_CHECKED,
+	PDC_MESSAGE_HANDLED,
+	PDC_STATE_MACHINE
+};
 
 static struct pd_protocol {
 	/* current port power role (SOURCE or SINK) */
@@ -239,6 +246,7 @@ static struct pd_protocol {
 	TX_DONE_CALLBACK tx_callback;
 	void* tx_param;
 	enum pd_states tx_saved_state;
+	enum pd_protocol_context tx_prev_context;
 #ifdef CONFIG_USB_PD_DUAL_ROLE
 	uint64_t next_role_swap;
 //#ifdef CONFIG_USB_PD_DUAL_ROLE_AUTO_TOGGLE
@@ -253,7 +261,7 @@ static struct pd_protocol {
 	int caps_count, hard_reset_sent;
 	int snk_cap_count;
 } pd[CONFIG_USB_PD_PORT_COUNT];
-uint64_t QAQ;
+
 /**
  * Set a task event.
  *
@@ -475,7 +483,7 @@ void pd_transmit_complete(int port, int status)
 		/* increment message ID counter */
 		pd[port].msg_id = (pd[port].msg_id + 1) & PD_MESSAGE_ID_COUNT;
 
-	pd[port].tx_status = (status & TCPC_TX_COMPLETE_SUCCESS) ? 1 : -1;
+	pd[port].tx_status = (status == TCPC_TX_COMPLETE_SUCCESS) ? 1 : -1;
 	task_set_event(PD_PORT_TO_TASK_ID(port), PD_EVENT_TX, 0);
 }
 
@@ -555,6 +563,7 @@ static void pd_transmit(int port, enum tcpm_transmit_type type,
 #ifdef CONFIG_USB_PD_REV30
 static int pd_txdone_sent_pending_ca(int port, int res, void* param) {
 	if (pd[port].tx_status >= 0)
+		/* Message was sent, so free up the buffer. */
 		pd[port].ca_buffered = 0;
 
 	return 0;
@@ -581,6 +590,7 @@ static int pd_ca_send_pending(int port)
 	}
 
 
+	// TODO: BUG?? If the source does not allow us to send the message, should we just discard it?
 	/* Message was sent, so free up the buffer. */
 	pd[port].ca_buffered = 0;
 	return 0;
@@ -1083,7 +1093,13 @@ static int pd_txdone_data_req_handled(int port, int res, void* param) {
 	return 0;
 }
 
-static void handle_data_request(int port, uint16_t head,
+static int pd_txdone_data_req_handled2(int port, int res, void* param) {
+	/* keep last contract in place (whether implicit or explicit) */
+	set_state(port, PD_STATE_SRC_READY);
+	return 0;
+}
+
+static int handle_data_request(int port, uint16_t head,
 		uint32_t *payload)
 {
 	int type = PD_HEADER_TYPE(head);
@@ -1118,7 +1134,7 @@ static void handle_data_request(int port, uint16_t head,
 			/* Source will resend source cap on failure */
 			pd_send_request_msg(port, 1);
 		}
-		break;
+		return 1;
 #endif /* CONFIG_USB_PD_FUNC_SNK */
 	case PD_DATA_REQUEST:
 		if ((pd[port].power_role == PD_ROLE_SOURCE) && (cnt == 1)) {
@@ -1131,14 +1147,12 @@ static void handle_data_request(int port, uint16_t head,
 #endif
 			if (!pd_check_requested_voltage(payload[0], port)) {
 				send_control(port, PD_CTRL_ACCEPT, pd_txdone_data_req_handled, (void*)payload[0]);
-				return;
+				return 1;
 			}
 		}
 		/* the message was incorrect or cannot be satisfied */
-		send_control(port, PD_CTRL_REJECT, 0, 0);
-		/* keep last contract in place (whether implicit or explicit) */
-		set_state(port, PD_STATE_SRC_READY);
-		break;
+		send_control(port, PD_CTRL_REJECT, pd_txdone_data_req_handled2, NULL);
+		return 1;
 	case PD_DATA_SINK_CAP:
 		pd[port].flags |= PD_FLAGS_SNK_CAP_RECVD;
 		/* snk cap 0 should be fixed PDO */
@@ -1158,6 +1172,7 @@ static void handle_data_request(int port, uint16_t head,
 	default:
 		CPRINTF("C%d Unhandled data message type %d\n", port, type);
 	}
+	return 0;
 }
 
 #ifdef CONFIG_USB_PD_DUAL_ROLE
@@ -1235,7 +1250,37 @@ static void pd_dr_swap(int port)
 	pd[port].flags |= PD_FLAGS_CHECK_IDENTITY;
 }
 
-static void handle_ctrl_request(int port, uint16_t head,
+#ifdef CONFIG_USB_PD_DUAL_ROLE
+static int pd_txdone_accept_pr_swap(int port, int res, void* param) {
+	/*
+	 * Clear flag for checking power role to avoid
+	 * immediately requesting another swap.
+	 */
+	pd[port].flags &= ~PD_FLAGS_CHECK_PR_ROLE;
+	set_state(port,
+		  DUAL_ROLE_IF_ELSE(port,
+			PD_STATE_SNK_SWAP_SNK_DISABLE,
+			PD_STATE_SRC_SWAP_SNK_DISABLE));
+	return 0;
+}
+#endif // #ifdef CONFIG_USB_PD_DUAL_ROLE
+
+#ifdef CONFIG_USB_PD_DR_SWAP
+static int pd_txdone_accept_dr_swap(int port, int res, void* param) {
+	if (res >= 0)
+		pd_dr_swap(port);
+	return 0;
+}
+#endif // #ifdef CONFIG_USB_PD_DR_SWAP
+
+#ifdef CONFIG_USBC_VCONN_SWAP
+static int pd_txdone_accept_vconn_swap(int port, int res, void* param) {
+	if (res > 0)
+		set_state(port, PD_STATE_VCONN_SWAP_INIT);
+}
+#endif /* CONFIG_USBC_VCONN_SWAP */
+
+static int handle_ctrl_request(int port, uint16_t head,
 		uint32_t *payload)
 {
 	int type = PD_HEADER_TYPE(head);
@@ -1246,6 +1291,9 @@ static void handle_ctrl_request(int port, uint16_t head,
 		break;
 	case PD_CTRL_PING:
 		/* Nothing else to do */
+		break;
+	case PD_CTRL_NOT_SUPPORTED:
+		head = 0;
 		break;
 
 #ifdef CONFIG_USD_PD_FUNC_SRC
@@ -1261,9 +1309,9 @@ static void handle_ctrl_request(int port, uint16_t head,
 #ifdef CONFIG_USB_PD_FUNC_SNK
 		send_sink_cap(port);
 #else
-		send_control(port, REFUSE(pd[port].rev));
+		send_control(port, REFUSE(pd[port].rev), NULL, NULL);
 #endif
-		break;
+		return 1;
 #ifdef CONFIG_USB_PD_DUAL_ROLE
 	case PD_CTRL_GOTO_MIN:
 #ifdef CONFIG_USB_PD_GIVE_BACK
@@ -1382,7 +1430,7 @@ static void handle_ctrl_request(int port, uint16_t head,
 			}
 		}
 #endif
-		break;
+		return 0;
 	case PD_CTRL_ACCEPT:
 		if (pd[port].task_state == PD_STATE_SOFT_RESET) {
 			/*
@@ -1415,32 +1463,22 @@ static void handle_ctrl_request(int port, uint16_t head,
 			set_state(port, PD_STATE_SNK_TRANSITION);
 #endif
 		}
-		break;
+		return 0;
 	case PD_CTRL_SOFT_RESET:
 		execute_soft_reset(port);
 		/* We are done, acknowledge with an Accept packet */
 		send_control(port, PD_CTRL_ACCEPT, NULL, NULL);
-		break;
+		return 1;
 	case PD_CTRL_PR_SWAP:
 #ifdef CONFIG_USB_PD_DUAL_ROLE
-		if (pd_check_power_swap(port)) {
-			send_control(port, PD_CTRL_ACCEPT);
-			/*
-			 * Clear flag for checking power role to avoid
-			 * immediately requesting another swap.
-			 */
-			pd[port].flags &= ~PD_FLAGS_CHECK_PR_ROLE;
-			set_state(port,
-				  DUAL_ROLE_IF_ELSE(port,
-					PD_STATE_SNK_SWAP_SNK_DISABLE,
-					PD_STATE_SRC_SWAP_SNK_DISABLE));
-		} else {
-			send_control(port, REFUSE(pd[port].rev));
-		}
+		if (pd_check_power_swap(port))
+			send_control(port, PD_CTRL_ACCEPT, pd_txdone_accept_pr_swap, NULL);
+		else
+			send_control(port, REFUSE(pd[port].rev), NULL, NULL);
 #else
 		send_control(port, REFUSE(pd[port].rev), NULL, NULL);
 #endif
-		break;
+		return 1;
 
 	case PD_CTRL_DR_SWAP:
 #ifdef CONFIG_USB_PD_DR_SWAP
@@ -1451,43 +1489,42 @@ static void handle_ctrl_request(int port, uint16_t head,
 			 * immediately requesting another swap.
 			 */
 			pd[port].flags &= ~PD_FLAGS_CHECK_DR_ROLE;
-			if (send_control(port, PD_CTRL_ACCEPT) >= 0)
-				pd_dr_swap(port);
+			send_control(port, PD_CTRL_ACCEPT, pd_txdone_accept_dr_swap, NULL);
 		} else {
-			send_control(port, REFUSE(pd[port].rev));
-
+			send_control(port, REFUSE(pd[port].rev), NULL, NULL);
 		}
 #else
 		send_control(port, REFUSE(pd[port].rev), NULL, NULL);
 #endif // CONFIG_USB_PD_DR_SWAP
-		break;
+		return 1;
 
 	case PD_CTRL_VCONN_SWAP:
 #ifdef CONFIG_USBC_VCONN_SWAP
 		if (pd[port].task_state == PD_STATE_SRC_READY ||
 		    pd[port].task_state == PD_STATE_SNK_READY) {
-			if (pd_check_vconn_swap(port)) {
-				if (send_control(port, PD_CTRL_ACCEPT) > 0)
-					set_state(port,
-						  PD_STATE_VCONN_SWAP_INIT);
-			} else {
-				send_control(port, REFUSE(pd[port].rev));
-			}
+			if (pd_check_vconn_swap(port))
+				send_control(port, PD_CTRL_ACCEPT, pd_txdone_accept_vconn_swap, NULL);
+			else
+				send_control(port, REFUSE(pd[port].rev), NULL, NULL);
 		}
 #else
 		send_control(port, REFUSE(pd[port].rev), NULL, NULL);
 #endif
-		break;
+		return 1;
+
 	default:
 #ifdef CONFIG_USB_PD_REV30
 		send_control(port, PD_CTRL_NOT_SUPPORTED);
+		return 1;
 #endif
 		CPRINTF("C%d Unhandled ctrl message type %d\n", port, type);
 	}
+	return 0;
 }
 
 #ifdef CONFIG_USB_PD_REV30
-static void handle_ext_request(int port, uint16_t head, uint32_t *payload)
+// TODO: need to be fixed
+static int handle_ext_request(int port, uint16_t head, uint32_t *payload)
 {
 	int type = PD_HEADER_TYPE(head);
 
@@ -1506,7 +1543,8 @@ static void handle_ext_request(int port, uint16_t head, uint32_t *payload)
 }
 #endif
 
-static void handle_request(int port, uint16_t head,
+// Return 1 if we send something and need to wait for its outcome
+static int handle_request(int port, uint16_t head,
 		uint32_t *payload)
 {
 	int cnt = PD_HEADER_CNT(head);
@@ -1530,15 +1568,14 @@ static void handle_request(int port, uint16_t head,
 
 #ifdef CONFIG_USB_PD_REV30
 	/* Check if this is an extended chunked data message. */
-	if (pd[port].rev == PD_REV30 && PD_HEADER_EXT(head)) {
-		handle_ext_request(port, head, payload);
-		return;
-	}
+	if (pd[port].rev == PD_REV30 && PD_HEADER_EXT(head))
+		return handle_ext_request(port, head, payload);
+
 #endif
 	if (cnt)
-		handle_data_request(port, head, payload);
+		return handle_data_request(port, head, payload);
 	else
-		handle_ctrl_request(port, head, payload);
+		return handle_ctrl_request(port, head, payload);
 }
 
 #ifdef CONFIG_USB_PD_USE_VDM
@@ -1601,7 +1638,17 @@ static uint64_t vdm_get_ready_timeout(uint32_t vdm_hdr)
 	return timeout;
 }
 
-static void pd_vdm_send_state_machine(int port)
+static void pd_txdone_sent_vdm(int port, int res, void* param) {
+	if (res < 0) {
+		pd[port].vdm_state = VDM_STATE_ERR_SEND;
+	} else {
+		pd[port].vdm_state = VDM_STATE_BUSY;
+		pd[port].vdm_timeout = timestamp_get() +
+			vdm_get_ready_timeout(pd[port].vdo_data[0]);
+	}
+}
+
+static int pd_vdm_send_state_machine(int port)
 {
 	int res;
 	uint16_t header;
@@ -1611,7 +1658,7 @@ static void pd_vdm_send_state_machine(int port)
 		/* Only transmit VDM if connected. */
 		if (!pd_is_connected(port)) {
 			pd[port].vdm_state = VDM_STATE_ERR_BUSY;
-			break;
+			return 0;
 		}
 
 		/*
@@ -1619,23 +1666,16 @@ static void pd_vdm_send_state_machine(int port)
 		 * a VDM.
 		 */
 		if (pdo_busy(port))
-			break;
+			return 0;
 
 		/* Prepare and send VDM */
 		header = PD_HEADER(PD_DATA_VENDOR_DEF, pd[port].power_role,
 				   pd[port].data_role, pd[port].msg_id,
 				   (int)pd[port].vdo_count,
 				   pd_get_rev(port), 0);
-		res = pd_transmit(port, TCPC_TX_SOP, header,
-				  pd[port].vdo_data);
-		if (res < 0) {
-			pd[port].vdm_state = VDM_STATE_ERR_SEND;
-		} else {
-			pd[port].vdm_state = VDM_STATE_BUSY;
-			pd[port].vdm_timeout = timestamp_get() +
-				vdm_get_ready_timeout(pd[port].vdo_data[0]);
-		}
-		break;
+		pd_transmit(port, TCPC_TX_SOP, header,
+				  pd[port].vdo_data, pd_txdone_sent_vdm, NULL);
+		return 1;
 	case VDM_STATE_WAIT_RSP_BUSY:
 		/* wait and then initiate request again */
 		if (timestamp_get() > pd[port].vdm_timeout) {
@@ -1643,16 +1683,16 @@ static void pd_vdm_send_state_machine(int port)
 			pd[port].vdo_count = 1;
 			pd[port].vdm_state = VDM_STATE_READY;
 		}
-		break;
+		return 0;
 	case VDM_STATE_BUSY:
 		/* Wait for VDM response or timeout */
 		if (pd[port].vdm_timeout &&
 		    (timestamp_get() > pd[port].vdm_timeout)) {
 			pd[port].vdm_state = VDM_STATE_ERR_TMOUT;
 		}
-		break;
+		return 0;
 	default:
-		break;
+		return 0;
 	}
 }
 #endif // #ifdef CONFIG_USB_PD_USE_VDM
@@ -2099,13 +2139,12 @@ void pd_protocol_run()
 	const int port = 0;
 	uint64_t now = timestamp_get();
 	uint64_t timeout = 0;
-	enum pd_states this_state;
 
 	if (pd[port].flags & PD_FLAGS_TX_GOING_ON) {
 		if (now > pd[port].tx_timeout) {
 			// Timeout
-			pd[port].flags &=~ PD_FLAGS_TX_GOING_ON;
 			pd[port].tx_status = -1;
+			pd[port].flags &=~ PD_FLAGS_TX_GOING_ON;
 		} else if (pd[port].pending_event & PD_EVENT_TX) {
 			pd[port].pending_event &=~ PD_EVENT_TX;
 			pd[port].flags &=~ PD_FLAGS_TX_GOING_ON;
@@ -2128,20 +2167,67 @@ void pd_protocol_run()
 		if (pd[port].tx_callback)
 			timeout = pd[port].tx_callback(port, pd[port].tx_status, pd[port].tx_param);
 
+		// Set the default timeout
 		if (timeout == 0)
 			timeout = 10*MSEC;
 
-		this_state = pd[port].tx_saved_state;
-		pd[port].tx_saved_state = PD_STATE_COUNT;	// Mark tx_saved_state as invalid
-		if (this_state < PD_STATE_COUNT) {
-			goto end_of_state_machine;
-		} else {
-			return;
+		switch(pd[port].tx_prev_context) {
+#ifdef CONFIG_USB_PD_REV30
+		case PDC_CA_SENT:
+			goto EOS_CA_SENT;
+#endif
+
+#ifdef CONFIG_USB_PD_USE_VDM
+		case PDC_VDM_SENT:
+			goto EOS_VDM_SENT;
+#endif
+
+		case PDC_BOARD_CHECKED:
+			goto EOS_BOARD_CHECKED;
+		case PDC_MESSAGE_HANDLED:
+			goto EOS_MESSAGE_HANDLED;
+		case PDC_STATE_MACHINE:
+			pd[port].last_state = pd[port].tx_saved_state;
+			pd[port].tx_saved_state = PD_STATE_COUNT;	// Mark tx_saved_state as invalid
+			goto EOS_STATE_MACHINE;
+		default:
+			return;	// This should not happen
 		}
 	}
 
+#ifdef CONFIG_USB_PD_REV30
+	/* send any pending messages */
+	if (pd_ca_send_pending(port)) {
+		pd[port].tx_prev_context = PDC_CA_SENT;
+		return;	// We need to send the cached messaged
+	}
+EOS_CA_SENT:
+#endif
+
+#ifdef CONFIG_USB_PD_USE_VDM
+	/* process VDM messages last */
+	if (pd_vdm_send_state_machine(port)) {
+		pd[port].tx_prev_context = PDC_VDM_SENT;
+		return;
+	}
+EOS_VDM_SENT:
+#endif
+
+	/* Verify board specific health status : current, voltages... */
+	if (pd_board_checks() != EC_SUCCESS) {
+		/* cut the power */
+		pd_execute_hard_reset(port);
+		/* notify the other side of the issue */
+		pd_transmit(port, TCPC_TX_HARD_RESET, 0, NULL, 0, 0);
+		pd[port].tx_prev_context = PDC_BOARD_CHECKED;
+		return;
+	}
+
+
 	/* wait for next event/packet or timeout expiration */
-	int evt = (now > pd[port].next_protocol_run) ? TASK_EVENT_TIMER : 0;
+	int evt;
+EOS_BOARD_CHECKED:
+	evt = (now > pd[port].next_protocol_run) ? TASK_EVENT_TIMER : 0;
 	evt |= pd[port].pending_event;
 	if (evt == 0)
 		return;	// Nothing happens
@@ -2154,27 +2240,6 @@ void pd_protocol_run()
 #ifdef CONFIG_USB_PD_DUAL_ROLE_AUTO_TOGGLE
 	const int auto_toggle_supported = tcpm_auto_toggle_supported(port);
 #endif
-
-#ifdef CONFIG_USB_PD_REV30
-	/* send any pending messages */
-	if (pd_ca_send_pending(port))
-		return;	// We need to send the cached messaged
-#endif
-
-#ifdef CONFIG_USB_PD_USE_VDM
-	/* process VDM messages last */
-	pd_vdm_send_state_machine(port);
-#endif
-
-	/* Verify board specific health status : current, voltages... */
-	if (pd_board_checks() != EC_SUCCESS) {
-		/* cut the power */
-		pd_execute_hard_reset(port);
-		/* notify the other side of the issue */
-		pd_transmit(port, TCPC_TX_HARD_RESET, 0, NULL, 0, 0);
-		return;
-	}
-
 
 #ifdef CONFIG_USB_PD_DUAL_ROLE
 		if (evt & PD_EVENT_UPDATE_DUAL_ROLE)
@@ -2244,15 +2309,22 @@ void pd_protocol_run()
 		}
 #endif
 
+
+		pd[port].tx_prev_context = PDC_MESSAGE_HANDLED;
 		/* process any potential incoming message */
 		if (evt & PD_EVENT_RX) {
-			if (!tcpm_get_message(port, payload, &head))
-				handle_request(port, head, payload);
+			if (!tcpm_get_message(port, payload, &head)) {
+				if (handle_request(port, head, payload))
+					return;	// We send something and need to wait for the outcome
+			}
 		}
 
+EOS_MESSAGE_HANDLED:
+		pd[port].tx_prev_context = PDC_STATE_MACHINE;
+
 		/* if nothing to do, verify the state of the world in 500ms */
-		this_state = pd[port].task_state;
-		pd[port].tx_saved_state = this_state;
+		enum pd_states this_state = pd[port].task_state;
+		pd[port].tx_saved_state = this_state;	// Save the current state
 		timeout = 500*MSEC;
 		switch (this_state) {
 		case PD_STATE_DISABLED:
@@ -3324,9 +3396,8 @@ void pd_protocol_run()
 			break;
 		}
 
-end_of_state_machine:
 		pd[port].last_state = this_state;
-
+EOS_STATE_MACHINE:
 		/*
 		 * Check for state timeout, and if not check if need to adjust
 		 * timeout value to wake up on the next state timeout.

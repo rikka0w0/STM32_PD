@@ -932,7 +932,7 @@ enum pd_data_msg_type {
 /* Used for processing pd header */
 #define PD_HEADER_EXT(header)  (((header) >> 15) & 1)
 #define PD_HEADER_CNT(header)  (((header) >> 12) & 7)
-#define PD_HEADER_TYPE(header) ((header) & 0xF)
+#define PD_HEADER_TYPE(header) ((header) & 0x1F)	// bit4..0 Google didn't get this right!
 #define PD_HEADER_ID(header)   (((header) >> 9) & 7)
 #define PD_HEADER_REV(header)  (((header) >> 6) & 3)
 
