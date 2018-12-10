@@ -277,7 +277,7 @@ void tcpc_i2c_write(uint8_t reg, uint32_t len, const uint8_t *payload)
 		break;
 	case TCPC_REG_TX_HDR:
 		pd.tx_payload[0] = payload[0];
-		pd.tx_payload[1] = (payload[1] << 8);
+		pd.tx_payload[1] = payload[1];
 		break;
 	case TCPC_REG_TX_DATA:
 		for (uint8_t i=0; i<len; i++)

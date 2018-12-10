@@ -27,7 +27,7 @@ static int max_mv, max_mv_index, max_mv_ma;
 int pd_build_request(int port, uint32_t *rdo, uint32_t *ma, uint32_t *mv, enum pd_request_type req_type){
 	*mv = max_mv;
 	*ma = max_mv_ma;
-	*rdo = RDO_FIXED(max_mv_index + 1, *ma, *ma, 0);
+	*rdo = RDO_FIXED(max_mv_index + 1, *ma, *ma, RDO_NO_SUSPEND | RDO_COMM_CAP);
 	return EC_SUCCESS;
 }
 
@@ -1007,7 +1007,8 @@ static int pd_send_request_msg(int port, int always_send_request)
 	uint16_t header = PD_HEADER(PD_DATA_REQUEST, pd[port].power_role,
 			pd[port].data_role, pd[port].msg_id, 1,
 			pd_get_rev(port), 0);
-
+uint64_t timeout = timestamp_get() + 1000;
+while (timestamp_get() < timeout);	// TODO: Fix this timing!
 	pd_transmit(port, TCPC_TX_SOP, header, &rdo, pd_txdone_request_new_pwr, (void*)always_send_request);
 	return EC_SUCCESS;
 }
@@ -1293,7 +1294,7 @@ static int handle_ctrl_request(int port, uint16_t head,
 		/* Nothing else to do */
 		break;
 	case PD_CTRL_NOT_SUPPORTED:
-		head = 0;
+		/* PD3.0 only, we should not get it*/
 		break;
 
 #ifdef CONFIG_USD_PD_FUNC_SRC
@@ -1312,8 +1313,11 @@ static int handle_ctrl_request(int port, uint16_t head,
 		send_control(port, REFUSE(pd[port].rev), NULL, NULL);
 #endif
 		return 1;
-#ifdef CONFIG_USB_PD_DUAL_ROLE
+
+
 	case PD_CTRL_GOTO_MIN:
+#ifdef CONFIG_USB_PD_FUNC_SNK
+
 #ifdef CONFIG_USB_PD_GIVE_BACK
 		if (pd[port].task_state == PD_STATE_SNK_READY) {
 			/*
@@ -1327,9 +1331,13 @@ static int handle_ctrl_request(int port, uint16_t head,
 				&pd[port].supply_voltage);
 			set_state(port, PD_STATE_SNK_TRANSITION);
 		}
-#endif
-
 		break;
+#endif  // #ifdef CONFIG_USB_PD_GIVE_BACK
+
+#else
+		send_control(port, REFUSE(pd[port].rev), NULL, NULL);
+		return 1;
+#endif	// #ifdef CONFIG_USB_PD_FUNC_SNK
 	case PD_CTRL_PS_RDY:
 		if (pd[port].task_state == PD_STATE_SNK_SWAP_SRC_DISABLE) {
 			set_state(port, PD_STATE_SNK_SWAP_STANDBY);
@@ -1365,7 +1373,7 @@ static int handle_ctrl_request(int port, uint16_t head,
 #endif
 		}
 		break;
-#endif
+
 	case PD_CTRL_REJECT:
 	case PD_CTRL_WAIT:
 		if (pd[port].task_state == PD_STATE_DR_SWAP) {
@@ -1430,7 +1438,7 @@ static int handle_ctrl_request(int port, uint16_t head,
 			}
 		}
 #endif
-		return 0;
+		break;
 	case PD_CTRL_ACCEPT:
 		if (pd[port].task_state == PD_STATE_SOFT_RESET) {
 			/*
@@ -1457,13 +1465,13 @@ static int handle_ctrl_request(int port, uint16_t head,
 			/* explicit contract goes away for power swap */
 			pd[port].flags &= ~PD_FLAGS_EXPLICIT_CONTRACT;
 			set_state(port, PD_STATE_SNK_SWAP_SNK_DISABLE);
+#endif
 		} else if (pd[port].task_state == PD_STATE_SNK_REQUESTED) {
 			/* explicit contract is now in place */
 			pd[port].flags |= PD_FLAGS_EXPLICIT_CONTRACT;
 			set_state(port, PD_STATE_SNK_TRANSITION);
-#endif
 		}
-		return 0;
+		break;
 	case PD_CTRL_SOFT_RESET:
 		execute_soft_reset(port);
 		/* We are done, acknowledge with an Accept packet */
@@ -1519,6 +1527,7 @@ static int handle_ctrl_request(int port, uint16_t head,
 #endif
 		CPRINTF("C%d Unhandled ctrl message type %d\n", port, type);
 	}
+
 	return 0;
 }
 

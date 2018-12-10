@@ -114,7 +114,7 @@ void tcpm_transmit(int port, enum tcpm_transmit_type type, uint16_t header, cons
 	tcpc_write16(TCPC_REG_TX_HDR, header);
 
 	if (cnt > 0)
-		tcpc_i2c_write(TCPC_REG_TX_DATA, cnt, (uint8_t*)&data);
+		tcpc_i2c_write(TCPC_REG_TX_DATA, cnt, (uint8_t*)data);
 
 	tcpc_write(TCPC_REG_TRANSMIT, TCPC_REG_TRANSMIT_SET(type));
 }
