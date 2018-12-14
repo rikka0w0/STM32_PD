@@ -5,6 +5,7 @@
 
 #define TCPC_TIMER_TOGGLE_SNK 60000
 #define TCPC_TIMER_TOGGLE_SRC 60000
+#define TCPC_TIMER_INTERFRAME_GAP 30	// uS
 
 // internal_flags
 #define TCPC_FLAG_LOOKING4CON (1<<0)
@@ -33,6 +34,7 @@ static struct pd_port_controller {
 	/* Power status */
 	uint8_t power_status;
 	uint8_t power_status_mask;
+	uint16_t vbus_100mv;
 
 	// MESSAGE_HEADER_INFO
 	uint8_t reg_msg_header_info;
@@ -56,6 +58,27 @@ static struct pd_port_controller {
 } pd;
 
 #define TX_LEN(header) (2+(PD_HEADER_CNT(header)<<2))	// 2-byte header + 4-byte payloads
+
+static inline void tx_buf_clear(void)
+{
+	for (uint8_t i = 0; i < sizeof(pd.tx_payload); i++)
+		pd.tx_payload[i] = 0;
+	pd.internal_flags &=~ TCPC_FLAG_TX_PENDING;
+}
+
+static inline void rx_buf_put(uint8_t frame_type)
+{
+	uint8_t rx_buf_head = pd.rx_buf_tail + pd.rx_buf_count;
+
+	if (rx_buf_head >= RX_BUFFER_SIZE)
+		rx_buf_head -= RX_BUFFER_SIZE;
+
+	pd.rx_message[rx_buf_head].frame_type = frame_type;
+	pd.rx_message[rx_buf_head].header =
+			pd_phy_get_rx_msg((uint8_t*)(&pd.rx_message[rx_buf_head].payload));
+
+	pd.rx_buf_count++;
+}
 
 static void alert(uint16_t mask)
 {
@@ -260,8 +283,10 @@ void tcpc_i2c_write(uint8_t reg, uint32_t len, const uint8_t *payload)
 	case TCPC_REG_RX_DETECT:
 		pd.reg_recv_detect = payload[0];
 
-		if (!TCPC_REG_RX_ENABLED(pd.reg_recv_detect))
+		if (!TCPC_REG_RX_ENABLED(pd.reg_recv_detect)) {
 			pd_phy_rx_disable_monitoring();
+			tx_buf_clear();
+		}
 
 		break;
 
@@ -364,6 +389,12 @@ uint32_t tcpc_i2c_read(uint8_t reg, uint8_t *payload)
 		for (uint8_t i=0; i<sizeof(pd.rx_message[pd.rx_buf_tail].payload); i++)
 			payload[i] = ((uint8_t*)&(pd.rx_message[pd.rx_buf_tail].payload))[i];
 		return sizeof(pd.rx_message[pd.rx_buf_tail].payload);
+
+	// Vbus
+	case TCPC_REG_VBUS_VOLTAGE:
+		payload[0] = pd.vbus_100mv & 0xff;
+		payload[1] = ((pd.vbus_100mv >> 8) & 0xff) | 0x800; // 10: VBUS measurement divided by 4
+		return 2;
 
 	default:
 		return 0;
@@ -482,27 +513,6 @@ static inline uint8_t check_goodcrc(uint8_t frame_type)
 		) ? 1 : 0;
 }
 
-static inline void tx_buf_clear(void)
-{
-	for (uint8_t i = 0; i < sizeof(pd.tx_payload); i++)
-		pd.tx_payload[i] = 0;
-	pd.internal_flags &=~ TCPC_FLAG_TX_PENDING;
-}
-
-static inline void rx_buf_put(uint8_t frame_type)
-{
-	uint8_t rx_buf_head = pd.rx_buf_tail + pd.rx_buf_count;
-
-	if (rx_buf_head >= RX_BUFFER_SIZE)
-		rx_buf_head -= RX_BUFFER_SIZE;
-
-	pd.rx_message[rx_buf_head].frame_type = frame_type;
-	pd.rx_message[rx_buf_head].header =
-			pd_phy_get_rx_msg((uint8_t*)(&pd.rx_message[rx_buf_head].payload));
-
-	pd.rx_buf_count++;
-}
-
 // Run TCPC state machine once
 void tcpc_run(void)
 {
@@ -569,33 +579,15 @@ void tcpc_run(void)
 		__asm__ __volatile__("cpsie i");
 	}
 
-	if (pd.internal_flags & TCPC_FLAG_LOOKING4CON) {
-		if (pd.internal_flags & TCPC_FLAG_DRP_TOGGLE_AS_SNK) {
-			if (cur_timestamp > pd.drp_last_toggle_timestamp + TCPC_TIMER_TOGGLE_SNK) {
-				// Timer expired, Switch to SRC (Rp)
-				pd.internal_flags &=~ TCPC_FLAG_DRP_TOGGLE_AS_SNK;
-				pd.internal_flags |= TCPC_FLAG_DRP_TOGGLE_AS_SRC;
-
-				pd_cc_set(TCPC_REG_ROLE_CTRL_SET(0, TCPC_REG_ROLE_CTRL_RP(pd.cc_role_ctrl), TYPEC_CC_RP, TYPEC_CC_RP));
-				pd.cc_status[0] = TYPEC_CC_VOLT_OPEN;
-				pd.cc_status[1] = TYPEC_CC_VOLT_OPEN;
-				pd.cc_last_sampled_timestamp = cur_timestamp;	// Postponed the next sampling of CC line, debouncing
-			}
-		} else if (pd.internal_flags & TCPC_FLAG_DRP_TOGGLE_AS_SRC) {
-			if (cur_timestamp > pd.drp_last_toggle_timestamp + TCPC_TIMER_TOGGLE_SRC) {
-				// Timer expired, Switch to SRC (Rp)
-				pd.internal_flags &=~ TCPC_FLAG_DRP_TOGGLE_AS_SRC;
-				pd.internal_flags |= TCPC_FLAG_DRP_TOGGLE_AS_SNK;
-
-				pd_cc_set(TCPC_REG_ROLE_CTRL_SET(0, 0, TYPEC_CC_RD, TYPEC_CC_RD));
-				pd.cc_status[0] = TYPEC_CC_VOLT_OPEN;
-				pd.cc_status[1] = TYPEC_CC_VOLT_OPEN;
-				pd.cc_last_sampled_timestamp = cur_timestamp;	// Postponed the next sampling of CC line, debouncing
-			}
-		}
-	}
-
 	if (TCPC_REG_RX_ENABLED(pd.reg_recv_detect) && (pd.internal_flags&TCPC_FLAG_TX_PENDING)) {
+		if (pd_phy_is_txing()) {
+			// Use drp toggle timestamp variable to ensure the interframe gap
+			pd.drp_last_toggle_timestamp = cur_timestamp + TCPC_TIMER_INTERFRAME_GAP;
+			return;
+		} else if (cur_timestamp < pd.drp_last_toggle_timestamp) {
+			return;
+		}
+
 		// We have an unread received message
 		if ((pd.alert&TCPC_REG_ALERT_RX_STATUS)||(pd.alert&TCPC_REG_ALERT_RX_HARD_RST)) {
 			tx_buf_clear();
@@ -617,7 +609,7 @@ void tcpc_run(void)
 			pd_tx(0);
 			tx_buf_clear(); // No retry
 			alert(TCPC_REG_ALERT_TX_SUCCESS);
-		} else if (cur_timestamp > pd.tx_start_timestamp + 1800 || (pd.tx_retry_count == -1)) {
+		} else if (cur_timestamp > pd.tx_start_timestamp + USB_PD_RX_TMOUT_US || (pd.tx_retry_count == -1)) {
 			pd_prepare_message(TCPC_REG_TRANSMIT_TYPE(pd.tx_type), TX_LEN(
 					((uint16_t)pd.tx_payload[0]) | ( ((uint16_t)pd.tx_payload[1])<<8 )
 											), pd.tx_payload);
@@ -631,11 +623,56 @@ void tcpc_run(void)
 				alert(TCPC_REG_ALERT_TX_FAILED);
 			}
 		}
-	} else if (cur_timestamp > pd.cc_last_sampled_timestamp + 1000) {
-		// Check CC lines every 1mS
-		pd.cc_last_sampled_timestamp = cur_timestamp;
+	} else {
+		// We are not sending messages, sample the CC lines
 
-		// Check CC lines
-		tcpc_detect_cc_status(cur_timestamp);
+		if (pd.internal_flags & TCPC_FLAG_LOOKING4CON) {
+			if (pd.internal_flags & TCPC_FLAG_DRP_TOGGLE_AS_SNK) {
+				if (cur_timestamp > pd.drp_last_toggle_timestamp + TCPC_TIMER_TOGGLE_SNK) {
+					// Timer expired, Switch to SRC (Rp)
+					pd.internal_flags &=~ TCPC_FLAG_DRP_TOGGLE_AS_SNK;
+					pd.internal_flags |= TCPC_FLAG_DRP_TOGGLE_AS_SRC;
+
+					pd_cc_set(TCPC_REG_ROLE_CTRL_SET(0, TCPC_REG_ROLE_CTRL_RP(pd.cc_role_ctrl), TYPEC_CC_RP, TYPEC_CC_RP));
+					pd.cc_status[0] = TYPEC_CC_VOLT_OPEN;
+					pd.cc_status[1] = TYPEC_CC_VOLT_OPEN;
+					pd.cc_last_sampled_timestamp = cur_timestamp;	// Postponed the next sampling of CC line, debouncing
+				}
+			} else if (pd.internal_flags & TCPC_FLAG_DRP_TOGGLE_AS_SRC) {
+				if (cur_timestamp > pd.drp_last_toggle_timestamp + TCPC_TIMER_TOGGLE_SRC) {
+					// Timer expired, Switch to SRC (Rp)
+					pd.internal_flags &=~ TCPC_FLAG_DRP_TOGGLE_AS_SRC;
+					pd.internal_flags |= TCPC_FLAG_DRP_TOGGLE_AS_SNK;
+
+					pd_cc_set(TCPC_REG_ROLE_CTRL_SET(0, 0, TYPEC_CC_RD, TYPEC_CC_RD));
+					pd.cc_status[0] = TYPEC_CC_VOLT_OPEN;
+					pd.cc_status[1] = TYPEC_CC_VOLT_OPEN;
+					pd.cc_last_sampled_timestamp = cur_timestamp;	// Postponed the next sampling of CC line, debouncing
+				}
+			}
+		}
+
+		if (cur_timestamp > pd.cc_last_sampled_timestamp + 1000) {
+			// Check CC lines every 1mS
+			pd.cc_last_sampled_timestamp = cur_timestamp;
+
+			// Check CC lines
+			tcpc_detect_cc_status(cur_timestamp);
+
+			// Sample the Vbus
+			pd.vbus_100mv = pd_vbus_read_voltage();
+
+			if (pd.vbus_100mv > 40) {
+				if (!(pd.power_status&TCPC_REG_POWER_STATUS_VBUS_PRES)
+						&& (pd.power_status_mask&TCPC_REG_POWER_STATUS_VBUS_PRES))
+					alert(TCPC_REG_ALERT_POWER_STATUS);
+				pd.power_status |= TCPC_REG_POWER_STATUS_VBUS_PRES;
+			} else {
+				if ((pd.power_status&TCPC_REG_POWER_STATUS_VBUS_PRES)
+						&& (pd.power_status_mask&TCPC_REG_POWER_STATUS_VBUS_PRES))
+					alert(TCPC_REG_ALERT_POWER_STATUS);
+				pd.power_status &=~ TCPC_REG_POWER_STATUS_VBUS_PRES;
+			}
+		}
 	}
 }

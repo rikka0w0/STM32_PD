@@ -3,6 +3,9 @@
 
 #include <stdint.h>
 
+// VBus sensing GPIO
+#define PD_VBUS_SENSING_PIN GPIO_PIN_0	// PA0
+
 // CC GPIO mapping
 #define PD_CC1_PIN GPIO_PIN_2
 #define PD_CC2_PIN GPIO_PIN_4
@@ -76,4 +79,5 @@ void pd_cc_rprp_init(void);
 uint8_t pd_cc_read_status(uint8_t cc, uint8_t resistor, uint8_t rp);
 void pd_cc_set(uint8_t role_ctrl_regval);
 void pd_set_vconn(uint8_t enabled, uint8_t orientation);
+uint16_t pd_vbus_read_voltage(void);
 #endif // __PD_PHY_H

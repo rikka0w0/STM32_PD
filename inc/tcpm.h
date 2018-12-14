@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "tcpc.h"
+#include "pd.h"
 
 void tcpm_get_cc(int port, int* cc1, int* cc2);
 

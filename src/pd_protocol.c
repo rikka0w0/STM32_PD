@@ -423,7 +423,7 @@ static inline void set_state(int port, enum pd_states next_state)
 		set_vconn(port, 0);
 #endif /* defined(CONFIG_USBC_VCONN) */
 #else /* CONFIG_USB_PD_DUAL_ROLE */
-	if (next_state == PD_STATE_SRC_DISCONNECTED) {
+	if (next_state == PD_STATE_SRC_DISCONNECTED || next_state == PD_STATE_SNK_DISCONNECTED) {	// TODO: Fix This!
 #endif // #ifdef CONFIG_USB_PD_DUAL_ROLE
 		/*
 		 * If we are source, make sure VBUS is off and
@@ -487,7 +487,6 @@ void pd_transmit_complete(int port, int status)
 	task_set_event(PD_PORT_TO_TASK_ID(port), PD_EVENT_TX, 0);
 }
 
-// TODO: Fix all pd_transmit behavior
 static void pd_transmit(int port, enum tcpm_transmit_type type,
 		       uint16_t header, const uint32_t *data, TX_DONE_CALLBACK callback, void* param)
 {
@@ -1007,8 +1006,7 @@ static int pd_send_request_msg(int port, int always_send_request)
 	uint16_t header = PD_HEADER(PD_DATA_REQUEST, pd[port].power_role,
 			pd[port].data_role, pd[port].msg_id, 1,
 			pd_get_rev(port), 0);
-uint64_t timeout = timestamp_get() + 1000;
-while (timestamp_get() < timeout);	// TODO: Fix this timing!
+
 	pd_transmit(port, TCPC_TX_SOP, header, &rdo, pd_txdone_request_new_pwr, (void*)always_send_request);
 	return EC_SUCCESS;
 }
@@ -3089,7 +3087,8 @@ EOS_MESSAGE_HANDLED:
 			break;
 		case PD_STATE_SNK_READY:
 			timeout = 20*MSEC;
-
+			extern uint16_t pd_vbus_read_voltage(void);
+			int qaq=pd_vbus_read_voltage();
 			/*
 			 * Don't send any PD traffic if we woke up due to
 			 * incoming packet or if VDO response pending to avoid
@@ -3461,7 +3460,7 @@ EOS_STATE_MACHINE:
 #endif
 			}
 		}
-#ifdef CONFIG_USB_PD_DUAL_ROLE
+#ifdef CONFIG_USB_PD_FUNC_SNK
 		/*
 		 * Sink disconnect if VBUS is low and we are not recovering
 		 * a hard reset.
@@ -3475,7 +3474,7 @@ EOS_STATE_MACHINE:
 			/* set timeout small to reconnect fast */
 			timeout = 5*MSEC;
 		}
-#endif /* CONFIG_USB_PD_DUAL_ROLE */
+#endif /* CONFIG_USB_PD_FUNC_SNK */
 }
 
 #ifdef CONFIG_COMMON_RUNTIME

@@ -14,7 +14,7 @@
 #endif
 
 // Available flags
-//#define CONFIG_USB_PD_VBUS_DETECT_TCPC
+#define CONFIG_USB_PD_VBUS_DETECT_TCPC
 //#define CONFIG_USB_PD_DISCHARGE_TCPC
 // #define CONFIG_USB_PD_DUAL_ROLE_AUTO_TOGGLE
 

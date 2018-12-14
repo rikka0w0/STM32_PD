@@ -16,13 +16,6 @@ static inline void tcpc_write16(uint8_t reg, uint16_t val)
 
 #define tcpc_read(reg, val)  tcpc_i2c_read(reg, val)
 
-#ifdef CONFIG_USB_PD_VBUS_DETECT_TCPC
-static void tcpm_get_power_status(int port, uint8_t* status)
-{
-	tcpc_i2c_read(TCPC_REG_POWER_STATUS, status);
-}
-#endif /* #ifdef CONFIG_USB_PD_VBUS_DETECT_TCPC */
-
 void tcpm_get_cc(int port, int* cc1, int* cc2)
 {
 	uint8_t status;
@@ -47,7 +40,7 @@ int tcpm_get_vbus_level(int port)
 	uint8_t reg;
 
 	/* Read Power Status register */
-	tcpm_get_power_status(port, &reg);
+	tcpc_read(TCPC_REG_POWER_STATUS, &reg);
 	/* Update VBUS status */
 	return reg & TCPC_REG_POWER_STATUS_VBUS_PRES ? 1 : 0;
 }

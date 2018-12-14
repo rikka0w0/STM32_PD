@@ -25,6 +25,7 @@
 //#define PD_CFG_RP_1A5		// Enable 5V1.5A Rp (12k)		PA11, PA12
 //#define PD_CFG_RP_DEF		// Enable 5V0.5A Rp (36k)		PA9, PA10
 #define PD_CFG_RD_CTRL		// Enable Rd (5.1k) control		PB3, PA15
+#define PD_CFG_VBUS_DECT	// Detect VBus
 
 // UFP CC line threshold value (Across Rd)
 //	ICapaticy 	CC_Min		CC_Max
@@ -132,6 +133,11 @@ uint8_t pd_cc_read_status(uint8_t cc, uint8_t resistor, uint8_t rp)
 
 void pd_cc_rprp_init(void)
 {
+#ifdef PD_CFG_VBUS_DECT
+	GPIOA->MODER |= (3<<(2*0));		// Set to analog mode
+	GPIOA->PUPDR &=~ (3<<(2*0));	// No pull-up/pull-down
+#endif
+
 #ifdef PD_CFG_VCONN_CTRL	// PF0, PF1
 	GPIOF->MODER &=~ (3<<(2*0));	// Set to input
 	GPIOF->OTYPER |= (1<<(1*0));	// Open drain
@@ -299,5 +305,22 @@ void pd_set_vconn(uint8_t enabled, uint8_t orientation)
 		PD_CC1_VCONN_DIS();
 		PD_CC2_VCONN_EN();
 	}
+#endif
+}
+
+/*
+ * Sample and return the bus voltage in 100mV
+ */
+uint16_t pd_vbus_read_voltage(void)
+{
+#ifdef PD_CFG_VBUS_DECT
+	uint32_t val = adc_read(PD_VBUS_SENSING_PIN);
+	// mV = val / 4096 * 3.3 * 1000 / 10k * (10k+62k)
+	// mV = val * 237600000 / 4096000 = val * 58.0078125
+	val *= 2376;
+	val >>= 12;	// 100mV
+	return val;
+#else
+	return 0;
 #endif
 }
