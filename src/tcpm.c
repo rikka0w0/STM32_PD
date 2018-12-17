@@ -210,7 +210,7 @@ void tcpc_alert(int port)
 
 int tcpm_init(int port)
 {
-	uint8_t power_status;
+//	uint8_t power_status;
 
 // 	TCPC_REG_POWER_STATUS_UNINIT should not be observed since our tcpc is always initialized first
 //	tcpc_read(TCPC_REG_POWER_STATUS, &power_status);

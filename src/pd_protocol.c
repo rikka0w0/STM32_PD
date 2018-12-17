@@ -408,9 +408,21 @@ static inline void set_state(int port, enum pd_states next_state)
 	    (last_state == PD_STATE_SRC_DISCONNECTED &&
 	     next_state == PD_STATE_SNK_DISCONNECTED))
 		return;
+#endif
 
-	if (next_state == PD_STATE_SRC_DISCONNECTED ||
-	    next_state == PD_STATE_SNK_DISCONNECTED) {
+	if (
+#ifdef CONFIG_USD_PD_FUNC_SRC
+			(next_state == PD_STATE_SRC_DISCONNECTED)
+#endif
+#if defined(CONFIG_USB_PD_FUNC_SNK) && defined(CONFIG_USD_PD_FUNC_SRC)
+			||
+#endif
+#ifdef CONFIG_USB_PD_FUNC_SNK
+			(next_state == PD_STATE_SNK_DISCONNECTED)
+#endif
+		) {	// TODO: Fix This!
+
+#ifdef CONFIG_USB_PD_FUNC_SNK
 		/* Clear the input current limit */
 		pd_set_input_current_limit(port, 0, 0);
 #ifdef CONFIG_CHARGE_MANAGER
@@ -419,12 +431,13 @@ static inline void set_state(int port, enum pd_states next_state)
 					CEIL_REQUESTOR_PD,
 					CHARGE_CEIL_NONE);
 #endif
+#endif // #ifdef CONFIG_USB_PD_FUNC_SNK
+
 #ifdef CONFIG_USBC_VCONN
 		set_vconn(port, 0);
 #endif /* defined(CONFIG_USBC_VCONN) */
-#else /* CONFIG_USB_PD_DUAL_ROLE */
-	if (next_state == PD_STATE_SRC_DISCONNECTED || next_state == PD_STATE_SNK_DISCONNECTED) {	// TODO: Fix This!
-#endif // #ifdef CONFIG_USB_PD_DUAL_ROLE
+
+#ifdef CONFIG_USD_PD_FUNC_SRC
 		/*
 		 * If we are source, make sure VBUS is off and
 		 * if PD REV3.0, restore RP.
@@ -442,12 +455,14 @@ static inline void set_state(int port, enum pd_states next_state)
 			tcpm_set_cc(port, TYPEC_CC_RP);
 #endif
 		}
+#endif // #ifdef CONFIG_USD_PD_FUNC_SRC
+
 #ifdef CONFIG_USB_PD_REV30
 		/* Adjust rev to highest level*/
 		pd[port].rev = PD_REV30;
 #endif
 		pd[port].flags &= ~PD_FLAGS_RESET_ON_DISCONNECT_MASK;
-#ifdef CONFIG_CHARGE_MANAGER
+#if defined(CONFIG_USB_PD_DUAL_ROLE) && defined(CONFIG_CHARGE_MANAGER)
 		charge_manager_update_dualrole(port, CAP_UNKNOWN);
 #endif
 #ifdef CONFIG_USB_PD_ALT_MODE_DFP
@@ -461,7 +476,7 @@ static inline void set_state(int port, enum pd_states next_state)
 		tcpm_set_rx_enable(port, 0);
 	}
 
-	//CPRINTF("C%d st%d %s\n", port, next_state, pd_state_names[next_state]);
+	CPRINTF("C%d st%d %s\n", port, next_state, pd_state_names[next_state]);
 }
 
 #ifdef CONFIG_USB_PD_REV30
@@ -880,7 +895,7 @@ void pd_execute_hard_reset(int port)
 	 */
 	pd[port].last_state = PD_STATE_HARD_RESET_EXECUTE;
 
-#ifdef CONFIG_USB_PD_DUAL_ROLE
+#ifdef CONFIG_USB_PD_FUNC_SNK
 	/*
 	 * If we are swapping to a source and have changed to Rp, restore back
 	 * to Rd and turn off vbus to match our power_role.
@@ -903,12 +918,14 @@ void pd_execute_hard_reset(int port)
 		set_state(port, PD_STATE_SNK_HARD_RESET_RECOVER);
 		return;
 	}
-#endif /* CONFIG_USB_PD_DUAL_ROLE */
+#endif /* CONFIG_USB_PD_FUNC_SNK */
 
+#ifdef CONFIG_USD_PD_FUNC_SRC
 	/* We are a source, cut power */
 	pd_power_supply_reset(port);
 	pd[port].src_recover = timestamp_get() + PD_T_SRC_RECOVER;
 	set_state(port, PD_STATE_SRC_HARD_RESET_RECOVER);
+#endif // #ifdef CONFIG_USD_PD_FUNC_SRC
 }
 
 static void execute_soft_reset(int port)
@@ -2253,13 +2270,7 @@ EOS_BOARD_CHECKED:
 			pd_update_dual_role_config(port);
 #endif
 
-#ifdef CONFIG_USB_PD_TCPC
-		/*
-		 * run port controller task to check CC and/or read incoming
-		 * messages
-		 */
-		tcpc_run(port, evt);
-#else
+#ifdef CONFIG_USB_PD_HANDLE_TCPC_RESET
 		/* if TCPC has reset, then need to initialize it again */
 		if (evt & PD_EVENT_TCPC_RESET) {
 			CPRINTS("TCPC p%d reset!", port);
@@ -2314,7 +2325,7 @@ EOS_BOARD_CHECKED:
 				set_state(port, PD_DEFAULT_STATE(port));
 			}
 		}
-#endif
+#endif // #ifdef CONFIG_USB_PD_HANDLE_TCPC_RESET
 
 
 		pd[port].tx_prev_context = PDC_MESSAGE_HANDLED;
@@ -3087,8 +3098,7 @@ EOS_MESSAGE_HANDLED:
 			break;
 		case PD_STATE_SNK_READY:
 			timeout = 20*MSEC;
-			extern uint16_t pd_vbus_read_voltage(void);
-			int qaq=pd_vbus_read_voltage();
+
 			/*
 			 * Don't send any PD traffic if we woke up due to
 			 * incoming packet or if VDO response pending to avoid

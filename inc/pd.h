@@ -4,6 +4,8 @@
  */
 
 /* USB Power delivery module */
+//#define CONFIG_USB_PD_HANDLE_TCPC_RESET	// Apply to TCPCi only
+//#define CONFIG_USBC_VCONN					// Capable of sourcing VConn, source-capable device only
 //#define CONFIG_USB_PD_USE_VDM				// Enable VDM reception and transmission
 //#define CONFIG_USB_PD_SEND_DISCOVER_IDENT	// Send DISCOVER_IDENTITY VDM
 #define CONFIG_USB_PD_FUNC_SNK			// Can act as a sink
