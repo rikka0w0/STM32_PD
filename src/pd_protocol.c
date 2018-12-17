@@ -420,7 +420,7 @@ static inline void set_state(int port, enum pd_states next_state)
 #ifdef CONFIG_USB_PD_FUNC_SNK
 			(next_state == PD_STATE_SNK_DISCONNECTED)
 #endif
-		) {	// TODO: Fix This!
+		) {
 
 #ifdef CONFIG_USB_PD_FUNC_SNK
 		/* Clear the input current limit */
@@ -628,9 +628,41 @@ static void send_control(int port, int type, TX_DONE_CALLBACK callback, void* pa
 }
 
 #ifdef CONFIG_USD_PD_FUNC_SRC
-static int send_source_cap(int port)
+static int pd_txdone_sent_src_cap(int port, int res, void* param) {
+	CPRINTF("C%d srcCAP>%d\n", port, res);
+
+	switch ((int)param) {	// mode
+	case 0:	// 	case PD_CTRL_GET_SOURCE_CAP:
+		if ((res >= 0) &&
+		    (pd[port].task_state == PD_STATE_SRC_DISCOVERY))
+			set_state(port, PD_STATE_SRC_NEGOCIATE);
+		break;
+	case 1: // 	case PD_STATE_SRC_DISCOVERY:
+		/* packet was acked => PD capable device) */
+		if (res >= 0) {
+			set_state(port, PD_STATE_SRC_NEGOCIATE);
+			pd[port].hard_reset_count = 0;
+			pd[port].caps_count = 0;
+			/* Port partner is PD capable */
+			pd[port].flags |= PD_FLAGS_PREVIOUS_PD_CONN;
+			return 10*MSEC;
+		}
+		/* failed, retry later */
+		pd[port].caps_count++;
+		return PD_T_SEND_SOURCE_CAP;
+	case 2: // 	case PD_STATE_SRC_READY:
+		if (res >= 0) {
+			set_state(port, PD_STATE_SRC_NEGOCIATE);
+			pd[port].flags &= ~PD_FLAGS_UPDATE_SRC_CAPS;
+		}
+		return PD_T_SOURCE_ACTIVITY;
+	}
+
+	return 0;
+}
+
+static void send_source_cap(int port, int mode)
 {
-	int bit_len;
 #if defined(CONFIG_USB_PD_DYNAMIC_SRC_CAP) || \
 		defined(CONFIG_USB_PD_MAX_SINGLE_SOURCE_CURRENT)
 	const uint32_t *src_pdo;
@@ -651,10 +683,7 @@ static int send_source_cap(int port)
 			pd[port].data_role, pd[port].msg_id, src_pdo_cnt,
 			pd_get_rev(port), 0);
 
-	bit_len = pd_transmit(port, TCPC_TX_SOP, header, src_pdo);
-	// CPRINTF("C%d srcCAP>%d\n", port, bit_len);
-
-	return bit_len;
+	pd_transmit(port, TCPC_TX_SOP, header, src_pdo, pd_txdone_sent_src_cap, (void*)mode);
 }
 #endif
 
@@ -1025,7 +1054,7 @@ static int pd_send_request_msg(int port, int always_send_request)
 			pd_get_rev(port), 0);
 
 	pd_transmit(port, TCPC_TX_SOP, header, &rdo, pd_txdone_request_new_pwr, (void*)always_send_request);
-	return EC_SUCCESS;
+	return 1;
 }
 #endif
 
@@ -1314,11 +1343,8 @@ static int handle_ctrl_request(int port, uint16_t head,
 
 #ifdef CONFIG_USD_PD_FUNC_SRC
 	case PD_CTRL_GET_SOURCE_CAP:
-		res = send_source_cap(port);
-		if ((res >= 0) &&
-		    (pd[port].task_state == PD_STATE_SRC_DISCOVERY))
-			set_state(port, PD_STATE_SRC_NEGOCIATE);
-		break;
+		send_source_cap(port, 0);
+		return 1;
 #endif
 
 	case PD_CTRL_GET_SINK_CAP:
@@ -1353,15 +1379,18 @@ static int handle_ctrl_request(int port, uint16_t head,
 		send_control(port, REFUSE(pd[port].rev), NULL, NULL);
 		return 1;
 #endif	// #ifdef CONFIG_USB_PD_FUNC_SNK
+
 	case PD_CTRL_PS_RDY:
 		if (pd[port].task_state == PD_STATE_SNK_SWAP_SRC_DISABLE) {
 			set_state(port, PD_STATE_SNK_SWAP_STANDBY);
+#ifdef CONFIG_USB_PD_DUAL_ROLE
 		} else if (pd[port].task_state == PD_STATE_SRC_SWAP_STANDBY) {
 			/* reset message ID and swap roles */
 			pd[port].msg_id = 0;
 			pd[port].power_role = PD_ROLE_SINK;
 			pd_update_roles(port);
 			set_state(port, PD_STATE_SNK_DISCOVERY);
+#endif // #ifdef CONFIG_USB_PD_DUAL_ROLE
 #ifdef CONFIG_USBC_VCONN_SWAP
 		} else if (pd[port].task_state == PD_STATE_VCONN_SWAP_INIT) {
 			/*
@@ -1371,6 +1400,7 @@ static int handle_ctrl_request(int port, uint16_t head,
 			if (pd[port].flags & PD_FLAGS_VCONN_ON)
 				set_state(port, PD_STATE_VCONN_SWAP_READY);
 #endif
+#ifdef CONFIG_USB_PD_FUNC_SNK
 		} else if (pd[port].task_state == PD_STATE_SNK_DISCOVERY) {
 			/* Don't know what power source is ready. Reset. */
 			set_state(port, PD_STATE_HARD_RESET_SEND);
@@ -1386,6 +1416,7 @@ static int handle_ctrl_request(int port, uint16_t head,
 						CEIL_REQUESTOR_PD,
 						pd[port].curr_limit);
 #endif
+#endif // #ifdef CONFIG_USB_PD_FUNC_SNK
 		}
 		break;
 
@@ -2035,7 +2066,7 @@ static int pd_txdone_sent_hrst(int port, int res, void* param) {
 		return 10*MSEC;
 	}
 
-	return 0;
+	return 500*MSEC;
 }
 
 static int pd_txdone_sent_srst(int port, int res, void* param) {
@@ -2054,10 +2085,42 @@ static int pd_txdone_sent_srst(int port, int res, void* param) {
 	return 0;
 }
 
+#ifdef CONFIG_USD_PD_FUNC_SRC
+static int pd_txdone_sent_get_sink_cap(int port, int res, void* param) {
+	set_state(port, PD_STATE_SRC_GET_SINK_CAP);
+	return PD_T_SOURCE_ACTIVITY;
+}
+
+static int pd_txdone_sent_ps_rdy(int port, int res, void* param) {
+	if (res >= 0) {
+		/* it'a time to ping regularly the sink */
+		set_state(port, PD_STATE_SRC_READY);
+		return 10*MSEC;
+	} else {
+		/* The sink did not ack, cut the power... */
+		set_state(port, PD_STATE_SRC_DISCONNECTED);
+	}
+	return 0;
+}
+
+#ifdef CONFIG_USD_PD_SRC_SEND_PING
+static int pd_txdone_ping_sent(int port, int res, void* param) {
+	if (res < 0) {
+		/* Ping dropped. Try soft reset. */
+		set_state(port, PD_STATE_SOFT_RESET);
+		return 10 * MSEC;
+	}
+	return 0;
+}
+#endif // #ifdef CONFIG_USD_PD_SRC_SEND_PING
+#endif // #ifdef CONFIG_USD_PD_FUNC_SRC
+
 void pd_protocol_init() {
 	int port = 0;
 	//pd[port].next_role_swap = PD_T_DRP_SNK;
+#if defined(CONFIG_USB_PD_FUNC_SNK) && !defined(CONFIG_USB_PD_VBUS_DETECT_NONE)
 	pd[port].snk_hard_reset_vbus_off = 0;
+#endif
 	pd[port].caps_count = 0;
 	pd[port].hard_reset_sent = 0;
 	pd[port].snk_cap_count = 0;
@@ -2571,21 +2634,8 @@ EOS_MESSAGE_HANDLED:
 			/* Send source cap some minimum number of times */
 			if (pd[port].caps_count < PD_CAPS_COUNT) {
 				/* Query capabilities of the other side */
-				res = send_source_cap(port);
-				/* packet was acked => PD capable device) */
-				if (res >= 0) {
-					set_state(port,
-						  PD_STATE_SRC_NEGOCIATE);
-					timeout = 10*MSEC;
-					pd[port].hard_reset_count = 0;
-					pd[port].caps_count = 0;
-					/* Port partner is PD capable */
-					pd[port].flags |=
-						PD_FLAGS_PREVIOUS_PD_CONN;
-				} else { /* failed, retry later */
-					timeout = PD_T_SEND_SOURCE_CAP;
-					pd[port].caps_count++;
-				}
+				send_source_cap(port, 1);
+				return;
 			}
 			break;
 		case PD_STATE_SRC_NEGOCIATE:
@@ -2618,16 +2668,8 @@ EOS_MESSAGE_HANDLED:
 			break;
 		case PD_STATE_SRC_TRANSITION:
 			/* the voltage output is good, notify the source */
-			res = send_control(port, PD_CTRL_PS_RDY);
-			if (res >= 0) {
-				timeout = 10*MSEC;
-				/* it'a time to ping regularly the sink */
-				set_state(port, PD_STATE_SRC_READY);
-			} else {
-				/* The sink did not ack, cut the power... */
-				set_state(port, PD_STATE_SRC_DISCONNECTED);
-			}
-			break;
+			send_control(port, PD_CTRL_PS_RDY, pd_txdone_sent_ps_rdy, NULL);
+			return;
 		case PD_STATE_SRC_READY:
 			timeout = PD_T_SOURCE_ACTIVITY;
 
@@ -2645,23 +2687,16 @@ EOS_MESSAGE_HANDLED:
 
 			/* Send updated source capabilities to our partner */
 			if (pd[port].flags & PD_FLAGS_UPDATE_SRC_CAPS) {
-				res = send_source_cap(port);
-				if (res >= 0) {
-					set_state(port,
-						  PD_STATE_SRC_NEGOCIATE);
-					pd[port].flags &=
-						~PD_FLAGS_UPDATE_SRC_CAPS;
-				}
-				break;
+				send_source_cap(port, 2);
+				return;
 			}
 
 			/* Send get sink cap if haven't received it yet */
 			if (!(pd[port].flags & PD_FLAGS_SNK_CAP_RECVD)) {
 				if (++pd[port].snk_cap_count <= PD_SNK_CAP_RETRIES) {
 					/* Get sink cap to know if dual-role device */
-					send_control(port, PD_CTRL_GET_SINK_CAP);
-					set_state(port, PD_STATE_SRC_GET_SINK_CAP);
-					break;
+					send_control(port, PD_CTRL_GET_SINK_CAP, pd_txdone_sent_get_sink_cap, NULL);
+					return;
 				} //else if (debug_level >= 2 &&
 				//	   snk_cap_count == PD_SNK_CAP_RETRIES+1) {
 				//	CPRINTF("C%d ERR SNK_CAP\n", port);
@@ -2686,7 +2721,7 @@ EOS_MESSAGE_HANDLED:
 
 			/* Send discovery SVDMs last */
 			if (pd[port].data_role == PD_ROLE_DFP &&
-			    (pd[port].flags & PD_FLAGS_CHECK_IDENTITY)) {	// TODO
+			    (pd[port].flags & PD_FLAGS_CHECK_IDENTITY)) {
 #ifdef CONFIG_USB_PD_SEND_DISCOVER_IDENT
 				pd_send_vdm(port, USB_SID_PD, CMD_DISCOVER_IDENT, NULL, 0);
 #endif // #ifdef CONFIG_USB_PD_SEND_DISCOVER_IDENT
@@ -2697,15 +2732,13 @@ EOS_MESSAGE_HANDLED:
 			if (!(pd[port].flags & PD_FLAGS_PING_ENABLED))
 				break;
 
+#ifdef CONFIG_USD_PD_SRC_SEND_PING
 			/* Verify that the sink is alive */
-			res = send_control(port, PD_CTRL_PING);
-			if (res >= 0)
-				break;
-
-			/* Ping dropped. Try soft reset. */
-			set_state(port, PD_STATE_SOFT_RESET);
-			timeout = 10 * MSEC;
+			send_control(port, PD_CTRL_PING, pd_txdone_ping_sent, NULL);
+			return;
+#else
 			break;
+#endif
 		case PD_STATE_SRC_GET_SINK_CAP:
 			if (pd[port].last_state != pd[port].task_state)
 				set_state_timeout(port,
@@ -2920,7 +2953,7 @@ EOS_MESSAGE_HANDLED:
 			}
 #endif // #ifdef CONFIG_USB_PD_DUAL_ROLE
 
-			/* We are attached */
+			/* We are attached */GPIOF->ODR |= 1;
 			pd[port].polarity = get_snk_polarity(cc1, cc2);
 			set_polarity(port, pd[port].polarity);
 			/* reset message ID  on connection */
@@ -3041,6 +3074,11 @@ EOS_MESSAGE_HANDLED:
 						  timestamp_get() +
 						  PD_T_NO_RESPONSE,
 						  PD_STATE_SNK_DISCONNECTED);
+				else {
+					// Rikka's patch: source is not PD capable
+					set_state(port, PD_STATE_SNK_READY);
+					timeout = 5*MSEC;
+				}
 #if defined(CONFIG_CHARGE_MANAGER)
 				/*
 				 * If we didn't come from disconnected, must
@@ -3098,6 +3136,11 @@ EOS_MESSAGE_HANDLED:
 			break;
 		case PD_STATE_SNK_READY:
 			timeout = 20*MSEC;
+			if (!pd_capable(port)) {
+				timeout = 200*MSEC;
+				break;
+			}
+			GPIOF->ODR |= 2;
 
 			/*
 			 * Don't send any PD traffic if we woke up due to
@@ -3113,8 +3156,14 @@ EOS_MESSAGE_HANDLED:
 
 			/* Check for new power to request */
 			if (pd[port].new_power_request) {
-				if (pd_send_request_msg(port, 0) != EC_SUCCESS)
+				switch(pd_send_request_msg(port, 0)) {
+				case 1:		// Changed & new request sent
+					return;
+				case -1:	// pd_build_request() Failed
 					set_state(port, PD_STATE_SOFT_RESET);
+				default:	// No change
+					break;
+				}
 				break;
 			}
 
@@ -3479,7 +3528,7 @@ EOS_STATE_MACHINE:
 		    !pd_is_vbus_present(port) &&
 		    pd[port].task_state != PD_STATE_SNK_HARD_RESET_RECOVER &&
 		    pd[port].task_state != PD_STATE_HARD_RESET_EXECUTE) {
-			/* Sink: detect disconnect by monitoring VBUS */
+			/* Sink: detect disconnect by monitoring VBUS */GPIOF->ODR &=~3;
 			set_state(port, PD_STATE_SNK_DISCONNECTED);
 			/* set timeout small to reconnect fast */
 			timeout = 5*MSEC;
