@@ -2293,7 +2293,7 @@ void pd_protocol_run()
 #endif
 
 		if (pd[port].tx_callback)
-			timeout = pd[port].tx_callback(port, pd[port].tx_status, pd[port].tx_param);
+			timeout = pd[port].tx_callback(port, (int)(pd[port].tx_status), pd[port].tx_param);
 
 		// Set the default timeout
 		if (timeout == 0)

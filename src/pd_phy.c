@@ -166,6 +166,9 @@ static const char dec4b5b[] = {
  * Set the active CC pin, as well as configure the comparator input pin and Tx pin
  */
 void pd_select_cc(uint8_t cc) {
+	if (cc == pd_selected_cc)
+		return;
+
 	GPIO_InitTypeDef GPIO_InitStruct;
 	if (cc == PD_CC_1) {	// CC1 is CC, PB4 is Tx
 	    GPIO_InitStruct.Pin = GPIO_PIN_4;
