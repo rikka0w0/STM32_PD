@@ -14,11 +14,43 @@ void pd_set_input_current_limit(int port, uint32_t max_ma, uint32_t supply_volta
 void pd_power_supply_reset(int port){};
 int pd_svdm(int port, int cnt, uint32_t *payload, uint32_t **rpayload){}
 int pd_custom_vdm(int port, int cnt, uint32_t *payload, uint32_t **rpayload){}
-int pd_check_requested_voltage(uint32_t rdo, const int port){}
+int pd_check_requested_voltage(uint32_t rdo, const int port){
+	int max_ma = rdo & 0x3FF;
+	int op_ma = (rdo >> 10) & 0x3FF;
+	int idx = RDO_POS(rdo);
+
+
+	uint32_t pdo;
+	uint32_t pdo_ma;
+#if defined(CONFIG_USB_PD_DYNAMIC_SRC_CAP) || \
+		defined(CONFIG_USB_PD_MAX_SINGLE_SOURCE_CURRENT)
+	const uint32_t *src_pdo;
+	const int pdo_cnt = charge_manager_get_source_pdo(&src_pdo, port);
+#else
+	const uint32_t *src_pdo = pd_src_pdo;
+	const int pdo_cnt = pd_src_pdo_cnt;
+#endif
+
+	/* check current ... */
+	pdo = src_pdo[idx - 1];
+	pdo_ma = (pdo & 0x3ff);
+	if (op_ma > pdo_ma)
+		return -1; /* too much op current */
+	if (max_ma > pdo_ma && !(rdo & RDO_CAP_MISMATCH))
+		return -1; /* too much max current */
+
+//	CPRINTF("Requested %d V %d mA (for %d/%d mA)\n",
+//		 ((pdo >> 10) & 0x3ff) * 50, (pdo & 0x3ff) * 10,
+//		 op_ma * 10, max_ma * 10);
+//	Request:0x230320C8
+//	SinkCap:0x260190C8
+	/* Accept the requested voltage */
+	return EC_SUCCESS;
+}
 void pd_execute_data_swap(int port, int data_role){}
 int pd_check_power_swap(int port){}
 int pd_check_data_swap(int port, int data_role){}
-int pd_set_power_supply_ready(int port){}
+int pd_set_power_supply_ready(int port){return 0;}
 void pd_transition_voltage(int idx){}
 void pd_check_dr_role(int port, int dr_role, int flags){}
 void pd_check_pr_role(int port, int pr_role, int flags){}
@@ -63,6 +95,7 @@ void pd_process_source_cap(int port, int cnt, uint32_t *src_caps)
 enum volt_idx {
 	PDO_IDX_5V  = 0,
 	PDO_IDX_9V  = 1,
+	PDO_IDX_12V = 2,
 	/* TODO: add PPS support */
 	PDO_IDX_COUNT
 };
@@ -72,14 +105,15 @@ enum volt_idx {
 /* PDOs */
 const uint32_t pd_src_pdo[] = {
 	[PDO_IDX_5V]  = PDO_FIXED(5000,  3000, PDO_FIXED_FLAGS_EXT),
-	[PDO_IDX_9V]  = PDO_FIXED(9000,  2500, PDO_FIXED_FLAGS),
+	[PDO_IDX_9V]  = PDO_FIXED(9000,  3500, PDO_FIXED_FLAGS_EXT),
+	[PDO_IDX_12V]  = PDO_FIXED(12000,  3500, PDO_FIXED_FLAGS_EXT),
 };
-const int pd_src_pdo_cnt = sizeof(pd_src_pdo);
+const int pd_src_pdo_cnt = PDO_IDX_COUNT;
 
 const uint32_t pd_snk_pdo[] = {
 	PDO_FIXED(5000, 1500, PDO_FIXED_FLAGS),
 };
-const int pd_snk_pdo_cnt = sizeof(pd_snk_pdo);
+const int pd_snk_pdo_cnt = 1;
 
 /* TODO: determine the following board specific type-C power constants */
 /*
@@ -1113,6 +1147,7 @@ static void pd_update_pdo_flags(int port, uint32_t pdo)
 #endif
 }
 
+#ifdef CONFIG_USD_PD_FUNC_SRC
 static int pd_txdone_data_req_handled(int port, int res, void* param) {
 	if (res < 0)
 		/*
@@ -1138,11 +1173,12 @@ static int pd_txdone_data_req_handled(int port, int res, void* param) {
 	return 0;
 }
 
-static int pd_txdone_data_req_handled2(int port, int res, void* param) {
+static int pd_txdone_data_req_rejected(int port, int res, void* param) {
 	/* keep last contract in place (whether implicit or explicit) */
 	set_state(port, PD_STATE_SRC_READY);
 	return 0;
 }
+#endif // #ifdef CONFIG_USD_PD_FUNC_SRC
 
 static int handle_data_request(int port, uint16_t head,
 		uint32_t *payload)
@@ -1181,6 +1217,8 @@ static int handle_data_request(int port, uint16_t head,
 		}
 		return 1;
 #endif /* CONFIG_USB_PD_FUNC_SNK */
+
+#ifdef CONFIG_USD_PD_FUNC_SRC
 	case PD_DATA_REQUEST:
 		if ((pd[port].power_role == PD_ROLE_SOURCE) && (cnt == 1)) {
 #ifdef CONFIG_USB_PD_REV30
@@ -1196,8 +1234,9 @@ static int handle_data_request(int port, uint16_t head,
 			}
 		}
 		/* the message was incorrect or cannot be satisfied */
-		send_control(port, PD_CTRL_REJECT, pd_txdone_data_req_handled2, NULL);
+		send_control(port, PD_CTRL_REJECT, pd_txdone_data_req_rejected, NULL);
 		return 1;
+
 	case PD_DATA_SINK_CAP:
 		pd[port].flags |= PD_FLAGS_SNK_CAP_RECVD;
 		/* snk cap 0 should be fixed PDO */
@@ -1205,6 +1244,8 @@ static int handle_data_request(int port, uint16_t head,
 		if (pd[port].task_state == PD_STATE_SRC_GET_SINK_CAP)
 			set_state(port, PD_STATE_SRC_READY);
 		break;
+#endif // #ifdef CONFIG_USD_PD_FUNC_SRC
+
 #ifdef CONFIG_USB_PD_REV30
 	case PD_DATA_BATTERY_STATUS:
 		break;
@@ -2953,7 +2994,7 @@ EOS_MESSAGE_HANDLED:
 			}
 #endif // #ifdef CONFIG_USB_PD_DUAL_ROLE
 
-			/* We are attached */GPIOF->ODR |= 1;
+			/* We are attached */
 			pd[port].polarity = get_snk_polarity(cc1, cc2);
 			set_polarity(port, pd[port].polarity);
 			/* reset message ID  on connection */
@@ -3076,6 +3117,7 @@ EOS_MESSAGE_HANDLED:
 						  PD_STATE_SNK_DISCONNECTED);
 				else {
 					// Rikka's patch: source is not PD capable
+					GPIOF->ODR |= 1;
 					set_state(port, PD_STATE_SNK_READY);
 					timeout = 5*MSEC;
 				}
@@ -3488,6 +3530,8 @@ EOS_STATE_MACHINE:
 		if (pd_is_power_swapping(port))
 			return;
 #endif
+
+#ifdef CONFIG_USD_PD_FUNC_SRC
 		if (pd[port].power_role == PD_ROLE_SOURCE) {
 			/* Source: detect disconnect by monitoring CC */
 			tcpm_get_cc(port, &cc1, &cc2);
@@ -3519,6 +3563,8 @@ EOS_STATE_MACHINE:
 #endif
 			}
 		}
+#endif // #ifdef CONFIG_USD_PD_FUNC_SRC
+
 #ifdef CONFIG_USB_PD_FUNC_SNK
 		/*
 		 * Sink disconnect if VBUS is low and we are not recovering
