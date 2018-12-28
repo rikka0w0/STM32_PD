@@ -7,9 +7,11 @@
 //#define CONFIG_USB_PD_HANDLE_TCPC_RESET	// Apply to TCPCi only
 //#define CONFIG_USBC_VCONN					// Capable of sourcing VConn, source-capable device only
 //#define CONFIG_USB_PD_USE_VDM				// Enable VDM reception and transmission
-//#define CONFIG_USB_PD_SEND_DISCOVER_IDENT	// Send DISCOVER_IDENTITY VDM
-#define CONFIG_USB_PD_FUNC_SNK			// Can act as a sink
-//#define CONFIG_USD_PD_FUNC_SRC			// Can act as a source
+//#define CONFIG_USB_PD_ALT_MODE			// Support alternate mode, need CONFIG_USB_PD_USE_VDM
+//#define CONFIG_USB_PD_FUNC_SNK			// Can act as a sink
+// CONFIG_USB_PD_STD_SNK_PWR_MGR			// Use Google's power profile selection method on sink
+	// Need to define PD_MAX_POWER_MW, PD_MAX_CURRENT_MA, PD_MAX_VOLTAGE_MV
+#define CONFIG_USD_PD_FUNC_SRC			// Can act as a source
 //#define CONFIG_USB_PD_DR_SWAP				// Support DR_SWAP
 #if defined(CONFIG_USB_PD_FUNC_SNK) && defined(CONFIG_USD_PD_FUNC_SRC)
 #define CONFIG_USB_PD_DUAL_ROLE 1
@@ -63,6 +65,7 @@ void task_set_event(uint32_t port, uint32_t event, int wait);
  */
 #define TASK_EVENT_TIMER	(1U << 31)
 #define EC_SUCCESS 0
+#define EC_ERROR_INVAL -1
 
 /* --- PD data message helpers --- */
 #define PDO_MAX_OBJECTS   7

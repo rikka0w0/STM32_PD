@@ -4,9 +4,11 @@
 #include "pd.h"
 
 extern void pd_protocol_run(); extern void pd_protocol_init();
+extern void pd_power_supply_init();
 int main(void) {
 	hw_init();
 
+	pd_power_supply_init();
 	tcpc_init();
 	pd_protocol_init();
 

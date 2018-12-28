@@ -3,55 +3,20 @@
  * found in the LICENSE file.
  */
 
-#include "platform.h"
+#include <stddef.h>
 #include "tcpm.h"
 #include "pd.h"
-#include <stddef.h>
 
 // Dummy Functions
 int pd_board_checks(void) {return EC_SUCCESS;}
 void pd_set_input_current_limit(int port, uint32_t max_ma, uint32_t supply_voltage){}
-void pd_power_supply_reset(int port){};
-int pd_svdm(int port, int cnt, uint32_t *payload, uint32_t **rpayload){}
 int pd_custom_vdm(int port, int cnt, uint32_t *payload, uint32_t **rpayload){}
-int pd_check_requested_voltage(uint32_t rdo, const int port){
-	int max_ma = rdo & 0x3FF;
-	int op_ma = (rdo >> 10) & 0x3FF;
-	int idx = RDO_POS(rdo);
-
-
-	uint32_t pdo;
-	uint32_t pdo_ma;
-#if defined(CONFIG_USB_PD_DYNAMIC_SRC_CAP) || \
-		defined(CONFIG_USB_PD_MAX_SINGLE_SOURCE_CURRENT)
-	const uint32_t *src_pdo;
-	const int pdo_cnt = charge_manager_get_source_pdo(&src_pdo, port);
-#else
-	const uint32_t *src_pdo = pd_src_pdo;
-	const int pdo_cnt = pd_src_pdo_cnt;
-#endif
-
-	/* check current ... */
-	pdo = src_pdo[idx - 1];
-	pdo_ma = (pdo & 0x3ff);
-	if (op_ma > pdo_ma)
-		return -1; /* too much op current */
-	if (max_ma > pdo_ma && !(rdo & RDO_CAP_MISMATCH))
-		return -1; /* too much max current */
-
-//	CPRINTF("Requested %d V %d mA (for %d/%d mA)\n",
-//		 ((pdo >> 10) & 0x3ff) * 50, (pdo & 0x3ff) * 10,
-//		 op_ma * 10, max_ma * 10);
 //	Request:0x230320C8
 //	SinkCap:0x260190C8
-	/* Accept the requested voltage */
-	return EC_SUCCESS;
-}
 void pd_execute_data_swap(int port, int data_role){}
 int pd_check_power_swap(int port){}
 int pd_check_data_swap(int port, int data_role){}
 int pd_set_power_supply_ready(int port){return 0;}
-void pd_transition_voltage(int idx){}
 void pd_check_dr_role(int port, int dr_role, int flags){}
 void pd_check_pr_role(int port, int pr_role, int flags){}
 int pd_snk_is_vbus_provided(int port) {return 1;}
@@ -91,25 +56,7 @@ void pd_process_source_cap(int port, int cnt, uint32_t *src_caps)
 
 
 // Dummy Variables
-/* Voltage indexes for the PDOs */
-enum volt_idx {
-	PDO_IDX_5V  = 0,
-	PDO_IDX_9V  = 1,
-	PDO_IDX_12V = 2,
-	/* TODO: add PPS support */
-	PDO_IDX_COUNT
-};
-#define PDO_FIXED_FLAGS_EXT (PDO_FIXED_DUAL_ROLE | PDO_FIXED_DATA_SWAP | PDO_FIXED_COMM_CAP | PDO_FIXED_EXTERNAL)
-
 #define PDO_FIXED_FLAGS (PDO_FIXED_DUAL_ROLE | PDO_FIXED_DATA_SWAP | PDO_FIXED_COMM_CAP)
-/* PDOs */
-const uint32_t pd_src_pdo[] = {
-	[PDO_IDX_5V]  = PDO_FIXED(5000,  3000, PDO_FIXED_FLAGS_EXT),
-	[PDO_IDX_9V]  = PDO_FIXED(9000,  3500, PDO_FIXED_FLAGS_EXT),
-	[PDO_IDX_12V]  = PDO_FIXED(12000,  3500, PDO_FIXED_FLAGS_EXT),
-};
-const int pd_src_pdo_cnt = PDO_IDX_COUNT;
-
 const uint32_t pd_snk_pdo[] = {
 	PDO_FIXED(5000, 1500, PDO_FIXED_FLAGS),
 };
@@ -898,7 +845,9 @@ static void queue_vdm(int port, uint32_t *header, const uint32_t *data,
 {
 	pd[port].vdo_count = data_cnt + 1;
 	pd[port].vdo_data[0] = header[0];
-	memcpy(&pd[port].vdo_data[1], data, sizeof(uint32_t) * data_cnt);
+	for (int i=0; i<data_cnt; i++) {
+		pd[port].vdo_data[1+i] = data[i];
+	}
 	/* Set ready, pd task will actually send */
 	pd[port].vdm_state = VDM_STATE_READY;
 }
@@ -1691,7 +1640,7 @@ void pd_send_vdm(int port, uint32_t vid, int cmd, const uint32_t *data,
 #endif
 	queue_vdm(port, pd[port].vdo_data, data, count);
 
-	task_wake(PD_PORT_TO_TASK_ID(port));
+	task_set_event(PD_PORT_TO_TASK_ID(port), TASK_EVENT_WAKE, 0);
 }
 
 static inline int pdo_busy(int port)
@@ -1734,7 +1683,7 @@ static uint64_t vdm_get_ready_timeout(uint32_t vdm_hdr)
 	return timeout;
 }
 
-static void pd_txdone_sent_vdm(int port, int res, void* param) {
+static int pd_txdone_sent_vdm(int port, int res, void* param) {
 	if (res < 0) {
 		pd[port].vdm_state = VDM_STATE_ERR_SEND;
 	} else {
@@ -1742,11 +1691,11 @@ static void pd_txdone_sent_vdm(int port, int res, void* param) {
 		pd[port].vdm_timeout = timestamp_get() +
 			vdm_get_ready_timeout(pd[port].vdo_data[0]);
 	}
+	return 0;
 }
 
 static int pd_vdm_send_state_machine(int port)
 {
-	int res;
 	uint16_t header;
 
 	switch (pd[port].vdm_state) {
@@ -2763,9 +2712,9 @@ EOS_MESSAGE_HANDLED:
 			/* Send discovery SVDMs last */
 			if (pd[port].data_role == PD_ROLE_DFP &&
 			    (pd[port].flags & PD_FLAGS_CHECK_IDENTITY)) {
-#ifdef CONFIG_USB_PD_SEND_DISCOVER_IDENT
+#ifdef CONFIG_USB_PD_USE_VDM
 				pd_send_vdm(port, USB_SID_PD, CMD_DISCOVER_IDENT, NULL, 0);
-#endif // #ifdef CONFIG_USB_PD_SEND_DISCOVER_IDENT
+#endif // #ifdef CONFIG_USB_PD_USE_VDM
 				pd[port].flags &= ~PD_FLAGS_CHECK_IDENTITY;
 				break;
 			}
@@ -3117,7 +3066,6 @@ EOS_MESSAGE_HANDLED:
 						  PD_STATE_SNK_DISCONNECTED);
 				else {
 					// Rikka's patch: source is not PD capable
-					GPIOF->ODR |= 1;
 					set_state(port, PD_STATE_SNK_READY);
 					timeout = 5*MSEC;
 				}
@@ -3182,7 +3130,6 @@ EOS_MESSAGE_HANDLED:
 				timeout = 200*MSEC;
 				break;
 			}
-			GPIOF->ODR |= 2;
 
 			/*
 			 * Don't send any PD traffic if we woke up due to
@@ -3228,9 +3175,9 @@ EOS_MESSAGE_HANDLED:
 			/* If DFP, send discovery SVDMs */
 			if (pd[port].data_role == PD_ROLE_DFP &&
 			     (pd[port].flags & PD_FLAGS_CHECK_IDENTITY)) {
-#ifdef CONFIG_USB_PD_SEND_DISCOVER_IDENT
+#ifdef CONFIG_USB_PD_USE_VDM
 				pd_send_vdm(port, USB_SID_PD, CMD_DISCOVER_IDENT, NULL, 0);
-#endif // #ifdef CONFIG_USB_PD_SEND_DISCOVER_IDENT
+#endif // #ifdef CONFIG_USB_PD_USE_VDM
 				pd[port].flags &= ~PD_FLAGS_CHECK_IDENTITY;
 				break;
 			}
@@ -3574,7 +3521,7 @@ EOS_STATE_MACHINE:
 		    !pd_is_vbus_present(port) &&
 		    pd[port].task_state != PD_STATE_SNK_HARD_RESET_RECOVER &&
 		    pd[port].task_state != PD_STATE_HARD_RESET_EXECUTE) {
-			/* Sink: detect disconnect by monitoring VBUS */GPIOF->ODR &=~3;
+			/* Sink: detect disconnect by monitoring VBUS */
 			set_state(port, PD_STATE_SNK_DISCONNECTED);
 			/* set timeout small to reconnect fast */
 			timeout = 5*MSEC;
