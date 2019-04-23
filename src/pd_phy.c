@@ -2,8 +2,6 @@
 #include "pd_phy.h"
 #include "pd.h"	// for GoodCRC and headers
 
-// Configuration Start ---------------------------------------------------
-#define PD_PHY_DETECT_ALL_SOP
 // Rx GPIO Configuration ----------------------------------
 #define PD_COMP_PIN1_ID 0 // PB0 as TIM3_CH3 during Rx
 #define PD_COMP_PIN2_ID 1 // PB1 as TIM3_CH4 during Rx
@@ -71,7 +69,7 @@ static int rx_edge_ts_idx;
 		^ (x &  8 ? 0x040 : 0x3C0) \
 		^ (x & 16 ? 0x100 : 0x300))
 
-#ifdef PD_PHY_DETECT_ALL_SOP
+#ifdef CONFIG_PD_DETECT_ALL_SOP
 static const uint16_t bmcsop[] = {
 	BMC(PD_SYNC1), BMC(PD_SYNC1), BMC(PD_SYNC1), BMC(PD_SYNC2),	// SOP
 	BMC(PD_SYNC1), BMC(PD_SYNC1), BMC(PD_SYNC3), BMC(PD_SYNC3),	// SOPP
@@ -79,7 +77,7 @@ static const uint16_t bmcsop[] = {
 	BMC(PD_SYNC1), BMC(PD_RST2), BMC(PD_RST2), BMC(PD_SYNC3),	// SOP_DBGP
 	BMC(PD_SYNC1), BMC(PD_RST2), BMC(PD_SYNC3), BMC(PD_SYNC2)	// SOP_DBGPP
 };
-#endif	// #ifdef PD_PHY_DETECT_ALL_SOP
+#endif	// #ifdef CONFIG_PD_DETECT_ALL_SOP
 
 enum pd_rx_special_4b5b {
 	TABLE_5b4b_SYNC1 = 16,
@@ -460,7 +458,7 @@ static inline uint8_t find_preamble(void) {
 
 		all = (all >> 1) | (cnt <= PD_RX_THRESHOLD ? 1 << 31 : 0);
 
-#ifdef PD_PHY_DETECT_ALL_SOP
+#ifdef CONFIG_PD_DETECT_ALL_SOP
 		if (all == 0x36DB6DB6) {
 			raw_ptr--;
 #else
@@ -470,16 +468,19 @@ static inline uint8_t find_preamble(void) {
 			return PD_RX_SOP;				// Potential SOP* packet
 		} else if (all == 0xF33F3F3F) {
 			return PD_RX_ERR_HARD_RESET;	// Got Hard-Reset
-		} else if (all == 0x3c7fe0ff) {
+		}
+#ifdef CONFIG_PD_DETECT_ALL_SOP
+		else if (all == 0x3C7FE0FF) {
 			return PD_RX_ERR_CABLE_RESET;	// Got Cable-Reset
 		}
+#endif
 
 		raw_ptr++;
 	}
 
 		/*
-		Explanation to the magic numbers:
-		1. The timer and comparator setup determines that, raw_samples[] contains number which is proportional to the width of pulses
+		Explanation of the magic numbers:
+		1. The timer and comparator setup determines that, numbers in raw_samples[] are proportional to the pulse width
 		2. "all = (all >> 1) | (cnt <= PERIOD_THRESHOLD ? 1 << 31 : 0);" gives 1 for narrow pulses and 0 for wide pulses
 		3. According to BMC encoding (refer to USD PD specification),
 			a data 1 is a transition in the middle of a frame
@@ -614,7 +615,7 @@ static inline uint8_t pd_rx_decode_byte(void) {
 static inline uint8_t pd_rx_process(void) {
 	uint8_t sop = find_preamble();
 	if (sop == PD_RX_SOP) {
-#ifdef PD_PHY_DETECT_ALL_SOP
+#ifdef CONFIG_PD_DETECT_ALL_SOP
 		uint8_t kcode1 = pd_rx_decode_byte();
 		uint8_t kcode2 = pd_rx_decode_byte();
 		uint8_t kcode3 = pd_rx_decode_byte();
@@ -641,7 +642,7 @@ static inline uint8_t pd_rx_process(void) {
 	} else if (sop ==PD_RX_ERR_HARD_RESET) {
 		return PD_RX_ERR_HARD_RESET;
 	}
-#ifdef PD_PHY_DETECT_ALL_SOP
+#ifdef CONFIG_PD_DETECT_ALL_SOP
 	else if (sop == PD_RX_ERR_CABLE_RESET) {
 		return PD_RX_ERR_CABLE_RESET;
 	}
@@ -960,7 +961,7 @@ void pd_prepare_message(uint8_t sop_type, uint8_t cnt, const uint8_t* data) {
 
 	write_preamble();
 
-#ifdef PD_PHY_DETECT_ALL_SOP
+#ifdef CONFIG_PD_DETECT_ALL_SOP
 	// Write SOP
 	for (i = 0; i < 4; i++)
 		write_sym(bmcsop[i+(sop_type<<2)]);
