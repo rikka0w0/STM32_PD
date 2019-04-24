@@ -3,11 +3,38 @@
 #include "pd.h"	// for GoodCRC and headers
 
 // Rx GPIO Configuration ----------------------------------
+#ifdef CONFIG_PD_USE_INTERNAL_COMP
+#define PD_COMP_PIN1 (((uint16_t)0x0001U) << 22)	// COMP2 Output -> EXTI 22
+#define PD_COMP_PIN2 PD_COMP_PIN1
+#else
 #define PD_COMP_PIN1_ID 0 // PB0 as TIM3_CH3 during Rx
 #define PD_COMP_PIN2_ID 1 // PB1 as TIM3_CH4 during Rx
 #define PD_COMP_PIN1 (((uint16_t)0x0001U) << PD_COMP_PIN1_ID)
 #define PD_COMP_PIN2 (((uint16_t)0x0001U) << PD_COMP_PIN2_ID)
 #define PD_COMP_GPIO GPIOB
+#endif
+
+#ifdef CONFIG_PD_USE_INTERNAL_COMP
+// Rx EXTI Configuration ----------------------------------
+#define PD_COMP_EXTI ADC1_COMP_IRQn	// EXTI 22, COMP2 Output
+// Rx Timer Configuration ---------------------------------
+// RM0091 page 446, IC1 = TI1FP1 input
+#define PD_RX_CCMR_CC1() (TIM3->CCMR1 = 0x0001)
+#define PD_RX_CCMR_CC2() PD_RX_CCMR_CC1()
+// RM0091 page 450, CC1E=1, Capture enabled
+// CC1NP=1, CC1P=1, IC1 falling/rising sensitive
+#define PD_RX_CCER_EN() (TIM3->CCER = 0x000B)
+#define PD_RX_CCER_DIS() (TIM3->CCER &= ~0x000F)
+// RM0091 page 444, Enable update CC1 generation
+#define PD_RX_EGR_UPDATE()	(TIM3->EGR = 0x3)	// CC1G, UG
+// RM0091 page 441, Enable DMA request for IC1
+#define PD_RX_DIER_SET() (TIM3->DIER = 0x0200)
+// Rx DMA Configuration -----------------------------------
+#define PD_RX_DMA_SRCADDR (&(TIM3->CCR1))
+#define PD_RX_DMA_CHANNEL DMA1_Channel4		// TIM3_CH1
+#define PD_RX_DMA_CLR_ISR() (DMA1->IFCR = 0xF000)
+// Configuration End -----------------------------------------------------
+#else
 // Rx EXTI Configuration ----------------------------------
 #define PD_COMP_EXTI EXTI0_1_IRQn
 // Rx Timer Configuration ---------------------------------
@@ -19,17 +46,25 @@
 // CC4NP=1, CC4P=1, IC4 falling/rising
 #define PD_RX_CCER_EN() (TIM3->CCER = 0xB000)
 #define PD_RX_CCER_DIS() (TIM3->CCER &= ~0xF000)
+// RM0091 page 444, Enable update CC4 generation
+#define PD_RX_EGR_UPDATE()	(TIM3->EGR = 0x11)	// CC4G, UG
 // RM0091 page 441, Enable DMA request for IC4
 #define PD_RX_DIER_SET() (TIM3->DIER = 0x1000)
 // Rx DMA Configuration -----------------------------------
 #define PD_RX_DMA_SRCADDR (&(TIM3->CCR4))
 #define PD_RX_DMA_CHANNEL DMA1_Channel3		// TIM3_CH4
+#define PD_RX_DMA_CLR_ISR() (DMA1->IFCR = 0xF00)
 // Configuration End -----------------------------------------------------
+#endif
 
 // Configurations that should not be changed -----------------------------
 #define PD_RX_TIM_INCLK 48000000
 #define PD_COMP_MASK (PD_COMP_PIN1 | PD_COMP_PIN2)
+#ifdef CONFIG_PD_USE_INTERNAL_COMP
+#define PD_COMP_PIN(cc) (PD_COMP_PIN1)
+#else
 #define PD_COMP_PIN(cc) (cc==PD_CC_1 ? PD_COMP_PIN1 : PD_COMP_PIN2)
+#endif
 #define PD_RX_TIMEOUT() (TIM3->SR & 4)
 #define PD_TX_DMA_CHANNEL DMA1_Channel3		// SPI1_Tx
 #define PD_TX_DMA_IRQ DMA1_Channel2_3_IRQn
@@ -178,13 +213,21 @@ void pd_select_cc(uint8_t cc) {
 
 	    pd_selected_cc = PD_CC_1;
 
-		// Comparator GPIO1
+#ifdef CONFIG_PD_USE_INTERNAL_COMP
+	    // Comparator Setup
+		// COMP2+ to PA1 (Window Mode), High hysteresis, inverted output
+	    // !!! Window Mode requires both COMP1 and COMP2 to be enabled!
+		COMP->CSR |= COMP_CSR_WNDWEN | COMP_CSR_COMP2HYST_Msk | COMP_CSR_COMP2POL | COMP_CSR_COMP2EN | COMP_CSR_COMP1EN |
+				(6<<COMP_CSR_COMP2INSEL_Pos) | (6<<COMP_CSR_COMP2OUTSEL_Pos);
+#else
+		// External comparator on GPIO
 		PD_COMP_GPIO->MODER &=~ (0x03 << (PD_COMP_PIN1_ID<<1));	// Set to input
 		PD_COMP_GPIO->PUPDR &=~ (0x03 << (PD_COMP_PIN1_ID<<1));	// Clear pull-up/pull-down
 		PD_COMP_GPIO->PUPDR |= (0x01 << (PD_COMP_PIN1_ID<<1));	// Set to pull-up
 		// EXTI0 to PB
 		(*(SYSCFG->EXTICR + (PD_COMP_PIN1_ID >> 2))) &=~ ( (0x0FU) << ((PD_COMP_PIN1_ID&0x03U)<<2) );
 		(*(SYSCFG->EXTICR + (PD_COMP_PIN1_ID >> 2))) |= ( (GPIO_GET_INDEX(PD_COMP_GPIO)) << ((PD_COMP_PIN1_ID&0x03U)<<2) );
+#endif
 		EXTI->EMR &=~ PD_COMP_PIN1;
 		EXTI->IMR &=~ PD_COMP_PIN1;		// Disable the external interrupt
 		EXTI->RTSR &=~ PD_COMP_PIN1;	// Disable rising trigger
@@ -193,8 +236,8 @@ void pd_select_cc(uint8_t cc) {
 		PD_RX_CCER_DIS();
 		PD_RX_CCMR_CC1();
 		PD_RX_CCER_EN();
-		// RM0091 page 444, Enable update CC4 generation
-		TIM3->EGR = 0x11;
+		// RM0091 page 444, Enable update CCx generation
+		PD_RX_EGR_UPDATE();
 		// RM0091 page 442, Clear flags
 		TIM3->SR = 0;
 	} else if (cc == PD_CC_2) {	// CC2 is CC, PA6 is Tx
@@ -214,13 +257,22 @@ void pd_select_cc(uint8_t cc) {
 
 	    pd_selected_cc = PD_CC_2;
 
-		// Comparator GPIO2
+#ifdef CONFIG_PD_USE_INTERNAL_COMP
+	    // Comparator Setup
+		// COMP2+ to PA1 (Window Mode), High hysteresis, inverted output
+	    // COMP2- to PA4 (COMP2_INM4) with output inverted to TIM3_IC1
+	    // !!! Window Mode requires both COMP1 and COMP2 to be enabled!
+		COMP->CSR |= COMP_CSR_WNDWEN | COMP_CSR_COMP2HYST_Msk | COMP_CSR_COMP2POL | COMP_CSR_COMP2EN | COMP_CSR_COMP1EN |
+				(4<<COMP_CSR_COMP2INSEL_Pos) | (6<<COMP_CSR_COMP2OUTSEL_Pos);
+#else
+		// External comparator on GPIO
 		PD_COMP_GPIO->MODER &=~ (0x03 << (PD_COMP_PIN2_ID<<1));	// Set to input
 		PD_COMP_GPIO->PUPDR &=~ (0x03 << (PD_COMP_PIN2_ID<<1));	// Clear pull-up/pull-down
 		PD_COMP_GPIO->PUPDR |= (0x01 << (PD_COMP_PIN2_ID<<1));	// Set to pull-up
 		// EXTI0 to PB
 		(*(SYSCFG->EXTICR + (PD_COMP_PIN2_ID >> 2))) &=~ ( (0x0FU) << ((PD_COMP_PIN2_ID&0x03U)<<2) );
 		(*(SYSCFG->EXTICR + (PD_COMP_PIN2_ID >> 2))) |= ( (GPIO_GET_INDEX(PD_COMP_GPIO)) << ((PD_COMP_PIN2_ID&0x03U)<<2) );
+#endif
 		EXTI->EMR &=~ PD_COMP_PIN2;
 		EXTI->IMR &=~ PD_COMP_PIN2;		// Disable the external interrupt
 		EXTI->RTSR &=~ PD_COMP_PIN2;	// Disable rising trigger
@@ -229,8 +281,8 @@ void pd_select_cc(uint8_t cc) {
 		PD_RX_CCER_DIS();
 		PD_RX_CCMR_CC2();
 		PD_RX_CCER_EN();
-		// RM0091 page 444, Enable update CC4 generation
-		TIM3->EGR = 0x11;
+		// RM0091 page 444, Enable update CCx generation
+		PD_RX_EGR_UPDATE();
 		// RM0091 page 442, Clear flags
 		TIM3->SR = 0;
 	} else {
@@ -238,6 +290,12 @@ void pd_select_cc(uint8_t cc) {
 		GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
 		GPIO_InitStruct.Pull = GPIO_NOPULL;
 		HAL_GPIO_Init(PD_CC_GPIO, &GPIO_InitStruct);
+
+#ifdef CONFIG_PD_USE_INTERNAL_COMP
+		// PA1 - Analog, for comparator reference
+		GPIO_InitStruct.Pin = GPIO_PIN_1;
+		HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+#endif
 
 		// PA6, PB4 to Hi-Z
 		GPIO_InitStruct.Pin = GPIO_PIN_6;
@@ -250,9 +308,13 @@ void pd_select_cc(uint8_t cc) {
 
 		pd_selected_cc = PD_CC_NC;
 
-		// Disable Comparator IT
+		// Disable Comparator
+#ifdef CONFIG_PD_USE_INTERNAL_COMP
+		COMP->CSR &=~ 0xFFFF0000;	// Reset and disable COMP2
+#else
 		GPIO_InitStruct.Pin = PD_COMP_MASK;
 		HAL_GPIO_Init(PD_COMP_GPIO, &GPIO_InitStruct);
+#endif
 	}
 }
 
@@ -399,6 +461,7 @@ void pd_phy_rx_start() {
 	raw_samples = (uint8_t*) raw_samples_buf;
 	rx_bytes = (uint8_t*) raw_samples_buf - 32;
 
+#ifndef CONFIG_PD_USE_INTERNAL_COMP
 	// Comparator GPIO -> Alternate function mode (for TIM3_CH4)
 	GPIO_InitTypeDef GPIO_InitStruct;
     GPIO_InitStruct.Pin = PD_COMP_PIN(pd_selected_cc);
@@ -407,11 +470,12 @@ void pd_phy_rx_start() {
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     GPIO_InitStruct.Alternate = GPIO_AF1_TIM3;
     HAL_GPIO_Init(PD_COMP_GPIO, &GPIO_InitStruct);
+#endif
 
 	// Disable DMA
 	PD_RX_DMA_CHANNEL->CCR = 0;
 	// Clear ISR
-	DMA1->IFCR = 0xF00;
+	PD_RX_DMA_CLR_ISR();
 
 	// Enable Rx timer's DMA request
 	PD_RX_DIER_SET();
@@ -711,7 +775,7 @@ void pd_rx_isr_handler(void) {
 	uint32_t pd_comp_pin = PD_COMP_PIN(pd_selected_cc);
 
 	// See RM0091 page 214 & EXTI_PR
-	if(__HAL_GPIO_EXTI_GET_IT(pd_comp_pin) != RESET) {
+	if(EXTI->PR &(pd_comp_pin)) {
 		rx_edge_ts[rx_edge_ts_idx] = timestamp_get();
 		next_idx = (rx_edge_ts_idx == PD_RX_TRANSITION_COUNT - 1) ?
 					0 : rx_edge_ts_idx + 1;

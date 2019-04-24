@@ -1,9 +1,17 @@
-/* USB Type-C Port PHY Configurations */
+/* USB Type-C Port PHY Configurations (pd_phy.c) */
 /*
  *	If defined, the PHY will detect all SOPs defined in PD3.0.
- *	Otherwise, it only detects SOP and Hard Reset.
+ *	Otherwise, it only detects SOP packets and Hard Reset.
  */
-#define CONFIG_PD_DETECT_ALL_SOP
+// #define CONFIG_PD_DETECT_ALL_SOP
+/**
+ *  Use the internal analog comparator available on STM32F051, STM32F07X, STM32F09X, e.t.c
+ *  If enabled PA1 should be connected to an external voltage reference (3V3 -75kOhm- Vref -15kOhm- GND),
+ *  !!! Low-end MCUs like STM32F030K6 should not enable this !!!
+ */
+// #define CONFIG_PD_USE_INTERNAL_COMP
+
+
 
 /* USB Power delivery module*/
 //#define CONFIG_USB_PD_HANDLE_TCPC_RESET	// Apply to TCPCi only

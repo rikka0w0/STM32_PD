@@ -15,6 +15,7 @@
 #include <cmsis_os.h>
 #endif
 #include "stm32f0xx_it.h"
+#include "pd_config.h"
 
 /* Private typedef -----------------------------------------------------------*/
 /* Private define ------------------------------------------------------------*/
@@ -43,7 +44,15 @@ void SysTick_Handler(void)
 
 extern void pd_rx_isr_handler(void);
 void EXTI0_1_IRQHandler(void) {
+#ifndef CONFIG_PD_USE_INTERNAL_COMP
 	pd_rx_isr_handler();
+#endif
+}
+
+void ADC_IRQHandler(void){
+#ifdef CONFIG_PD_USE_INTERNAL_COMP
+	pd_rx_isr_handler();
+#endif
 }
 
 extern void pd_tx_isr_handler(void);
