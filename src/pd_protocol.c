@@ -4,6 +4,7 @@
  */
 
 #include <stddef.h>
+#include "platform.h"	// For timestamp
 #include "tcpm.h"
 #include "pd.h"
 
